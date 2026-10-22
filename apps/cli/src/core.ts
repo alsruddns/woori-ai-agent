@@ -45,17 +45,18 @@ export async function fetchPage(url:string):Promise<Check> {
   } catch(e) {check.errors.push(e instanceof Error?e.message:String(e));}
   return check;
 }
-export async function discover(limit=50) {
+export async function discover(limit=50,serviceId='all') {
   const db=initDb(); const urls=new Set<string>();
   for(const service of config.services) for(const sitemap of service.sitemaps) {
     try {const res=await fetch(new URL(sitemap,config.baseUrl),{signal:AbortSignal.timeout(20000),headers:{'user-agent':'WooriSiteIntelligence/0.1 (read-only quality monitoring)'}}); if(!res.ok)continue; const xml=await res.text(); const $=load(xml,{xmlMode:true}); $('loc').each((_,el)=>{const u=$(el).text().trim(); if(u.startsWith(config.baseUrl))urls.add(u);});} catch {}
   }
   // Prioritize one representative route per service/locale, then fill from sitemap in source order.
   const selected:string[]=[]; const seen=new Set<string>();
-  // Ensure initial coverage across all services before spending the inspection budget on locales.
-  for(const s of config.services) {const candidate=`${config.baseUrl}/ko${s.pathPrefix?`/${s.pathPrefix}`:''}`; if(urls.has(candidate)&&!seen.has(candidate)){selected.push(candidate);seen.add(candidate);}}
-  for(const locale of config.locales) for(const s of config.services) {const candidate=`${config.baseUrl}/${locale}${s.pathPrefix?`/${s.pathPrefix}`:''}`; if(urls.has(candidate)&&!seen.has(candidate)){selected.push(candidate);seen.add(candidate);}}
-  for(const u of urls) if(selected.length<limit&&!seen.has(u)){selected.push(u);seen.add(u);}
+  const services=serviceId==='all'?config.services:config.services.filter(s=>s.id===serviceId);
+  // Ensure initial coverage across services, or locales for the requested service, first.
+  if(serviceId==='all') for(const s of services) {const candidate=`${config.baseUrl}/ko${s.pathPrefix?`/${s.pathPrefix}`:''}`; if(urls.has(candidate)&&!seen.has(candidate)){selected.push(candidate);seen.add(candidate);}}
+  for(const locale of config.locales) for(const s of services) {const candidate=`${config.baseUrl}/${locale}${s.pathPrefix?`/${s.pathPrefix}`:''}`; if(urls.has(candidate)&&!seen.has(candidate)){selected.push(candidate);seen.add(candidate);}}
+  for(const u of urls) if(selected.length<limit&&!seen.has(u)&&(serviceId==='all'||serviceFor(u).id===serviceId)){selected.push(u);seen.add(u);}
   const insert=db.prepare('INSERT OR REPLACE INTO discovered_urls(url,service,locale,discovered_at) VALUES(?,?,?,?)'); const now=new Date().toISOString();
   const tx=db.transaction((items:string[])=>items.forEach(u=>insert.run(u,serviceFor(u).id,localeFor(u),now))); tx([...urls]);
   return {total:urls.size,selected:selected.slice(0,limit),db};
