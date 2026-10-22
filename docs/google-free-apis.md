@@ -39,7 +39,7 @@ API 연결은 기본 비활성화입니다. 이 프로젝트는 사용자를 대
    pnpm agent gsc run --range=custom --start-date=2026-09-01 --end-date=2026-09-30
    ```
 
-   예시 URL은 형식 설명일 뿐입니다. `select`에는 반드시 `properties` 응답에 실제로 반환된 문자열을 복사하세요. 첫 Search Analytics 실행은 최대 7개의 순차 요청, 하루 최대 12개 GSC 요청(속성 조회 포함), 6시간 캐시, 최대 250행/차원을 사용합니다. 제한에 걸리면 재시도하지 않고 중단합니다. Google은 Search Console 성과 데이터가 일반적으로 2–3일 후 제공되며, page/query 그룹에서 일부 데이터가 생략될 수 있다고 안내합니다. 보고서는 마지막 3일을 기본 제외하고 행 제한에 도달하면 부분 응답으로 표시합니다.
+   예시 URL은 형식 설명일 뿐입니다. `select`에는 반드시 `properties` 응답에 실제로 반환된 문자열을 복사하세요. Search Analytics 보고서는 최대 8개의 순차 요청(현재 6개 차원, 비교 기간 2개), 하루 최대 12개 GSC 요청(속성 조회 포함), 6시간 캐시, 최대 250행/차원을 사용합니다. 제한에 걸리면 재시도하지 않고 중단합니다. Google은 Search Console 성과 데이터가 일반적으로 2–3일 후 제공되며, page/query 그룹에서 일부 데이터가 생략될 수 있다고 안내합니다. 보고서는 마지막 3일을 기본 제외하고 행 제한에 도달하면 부분 응답으로 표시합니다.
 
 7. SQLite의 `gsc_properties`, `gsc_report_sets`, `gsc_report_rows`, `analytics_daily`, `agent_data`, `api_cache`, `api_usage`에 실제 응답 및 상태를 저장합니다. GitHub Actions는 OAuth 토큰을 받지 않으며 GSC 인증·수집을 실행하지 않습니다.
 8. 연결을 끊으려면 `GSC_API_ENABLED=false`로 바꾸고 Google 계정에서 앱 동의를 취소하세요. 필요하면 DPAPI 파일과 SQLite 분석 데이터/캐시를 사용자가 직접 지웁니다.
