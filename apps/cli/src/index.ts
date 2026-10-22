@@ -6,6 +6,7 @@ import {runLighthouse} from './performance.js';
 import {assertNoPaidAiApi,getAiPolicy} from './ai-policy.js';
 import {writeCodexPrompts} from './codex-prompts.js';
 import {reviewContent,comparePageMetadata,writeGrowthIdeas} from './rule-agents.js';
+import {aggregateRunStatus} from './run-status.js';
 
 const args=process.argv.slice(2); const command=args[0]??'help';
 const option=(name:string,fallback:string)=>args.find(a=>a.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
@@ -33,7 +34,7 @@ async function main(){
    else if(agent==='performance'){const result=await runLighthouse(runId,chosen.slice(0,2));saveFeatureResults(result.features);saveFindings(runId,result.findings);findings.push(...result.findings);statuses[agent]=result.features.some(f=>f.status==='Failed')?'Failed':result.features.length>0&&result.features.every(f=>f.status==='Not Covered')?'Not Covered':'Completed';}
    else statuses[agent]='Not Configured';
  }
- const resultsDb=(await import('./core.js')).initDb();const notCovered=(resultsDb.prepare("SELECT COUNT(*) n FROM feature_results WHERE run_id=? AND status='Not Covered'").get(runId) as {n:number}).n;const failedFeatures=(resultsDb.prepare("SELECT COUNT(*) n FROM feature_results WHERE run_id=? AND status='Failed'").get(runId) as {n:number}).n;const featureResults=resultsDb.prepare('SELECT status,COUNT(*) count FROM feature_results WHERE run_id=? GROUP BY status').all(runId);const inspected=(resultsDb.prepare('SELECT COUNT(DISTINCT url) n FROM checks WHERE run_id=?').get(runId) as {n:number}).n;const pageFailures=checks.filter(c=>c.status===null||c.status>=400).length;const highFindings=findings.filter(f=>f.severity==='Critical'||f.severity==='High').length;const failed=pageFailures+Math.max(failedFeatures,highFindings);resultsDb.close();finishRun(runId,failed?'Failed':'Completed',inspected,failed,notCovered);const dir=writeReports(runId,command,checks,findings); console.log(JSON.stringify({runId,statuses,checked:inspected,featureResults,findings:findings.length,report:dir},null,2));
+ const resultsDb=(await import('./core.js')).initDb();const notCovered=(resultsDb.prepare("SELECT COUNT(*) n FROM feature_results WHERE run_id=? AND status='Not Covered'").get(runId) as {n:number}).n;const failedFeatures=(resultsDb.prepare("SELECT COUNT(*) n FROM feature_results WHERE run_id=? AND status='Failed'").get(runId) as {n:number}).n;const featureResults=resultsDb.prepare('SELECT status,COUNT(*) count FROM feature_results WHERE run_id=? GROUP BY status').all(runId);const inspected=(resultsDb.prepare('SELECT COUNT(DISTINCT url) n FROM checks WHERE run_id=?').get(runId) as {n:number}).n;const pageFailures=checks.filter(c=>c.status===null||c.status>=400).length;const highFindings=findings.filter(f=>f.severity==='Critical'||f.severity==='High').length;const failed=pageFailures+Math.max(failedFeatures,highFindings);const status=aggregateRunStatus(Boolean(failed),statuses);resultsDb.close();finishRun(runId,status,inspected,failed,notCovered);const dir=writeReports(runId,command,checks,findings); console.log(JSON.stringify({runId,status,statuses,checked:inspected,featureResults,findings:findings.length,report:dir},null,2));
  if(Object.values(statuses).includes('Failed'))process.exitCode=1;
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});
