@@ -13,4 +13,9 @@ describe('stable known accessibility selectors',()=>{
   expect(result.known).toEqual(['.family-link:nth-child(3)']);
   expect(result.unmatched).toEqual(['small']);
  });
+ it('matches localized header aria labels by the stable site-brand marker',()=>{
+  const result=splitKnownIssueSelectors(['a[aria-label="Go to woori.today home"]','a[aria-label="Unrelated link"]'],['a[aria-label*="woori.today"]']);
+  expect(result.known).toEqual(['a[aria-label="Go to woori.today home"]']);
+  expect(result.unmatched).toEqual(['a[aria-label="Unrelated link"]']);
+ });
 });
