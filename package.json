@@ -22,6 +22,8 @@
     "agent:ads": "pnpm agent ads",
     "agent:change": "pnpm agent change",
     "agent:analytics": "pnpm agent analytics",
+    "agent:gsc": "pnpm agent gsc run",
+    "agent:gsc:properties": "pnpm agent gsc properties",
     "agent:google:connect": "tsx apps/cli/src/google-auth.ts",
     "agent:improvement": "pnpm agent improvement",
     "agent:report": "pnpm agent report",

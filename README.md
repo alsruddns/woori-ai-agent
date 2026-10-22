@@ -54,6 +54,10 @@ Use repository secrets only when adding external API adapters. Limit OAuth scope
 
 Content, Growth, Improvement, and advertising-layout inspection run with local rules against a page-limited set of public pages. Competitor collection is disabled until terms are reviewed and explicit crawl opt-in is recorded; robots.txt is checked before page requests and collection is capped at three pages per domain. GSC, GA4, and AdSense return `Not Configured` until local read-only consent and provider configuration are supplied. GA4 and AdSense also require explicit confirmation that Cloud billing remains disabled; the app never creates projects or enables billing. Pricing and fail-closed rules are documented in [docs/google-free-api-policy.md](docs/google-free-api-policy.md) and [docs/google-free-apis.md](docs/google-free-apis.md).
 
+### Search Console local SEO analysis
+
+Windows users can opt in to GSC with only the `webmasters.readonly` scope, list the actual properties returned by Google, select an exact returned `siteUrl`, and run cached, request-capped reports. See [the local GSC setup guide](docs/google-free-apis.md). GSC credentials and collection never run in GitHub Actions; without local OAuth consent the result stays `Not Configured`.
+
 ## Codex + Playwright MCP
 
 Interactive browser exploration is separate from deterministic CLI/Actions QA. Follow [the MCP exploration guide](docs/playwright-mcp.md). The local Codex CLI `0.156.1` lists the Playwright server as enabled but `Unsupported`; `npx --yes @playwright/mcp@latest --help` starts successfully, while no MCP browser tool is exposed in this session. Therefore the browser MCP handshake is not verified. `agent:explore` reports `Not Configured`. CI never uses an AI model API.

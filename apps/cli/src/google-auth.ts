@@ -8,7 +8,7 @@ async function main(){
  if(process.platform!=='win32')throw new Error('The interactive local OAuth setup is supported on Windows only.');
  const clientId=process.env.GOOGLE_OAUTH_CLIENT_ID,clientSecret=process.env.GOOGLE_OAUTH_CLIENT_SECRET;
  if(!clientId||!clientSecret)throw new Error('Set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET from a Google Cloud Desktop OAuth client in your local .env first.');
- const selected=(process.argv.find(x=>x.startsWith('--providers='))?.slice('--providers='.length)??'gsc,ga4').split(',').map(x=>x.trim()).filter(Boolean);
+ const selected=(process.argv.find(x=>x.startsWith('--providers='))?.slice('--providers='.length)??'gsc').split(',').map(x=>x.trim()).filter(Boolean);
  const scopeByProvider:Record<string,string>={gsc:'https://www.googleapis.com/auth/webmasters.readonly',ga4:'https://www.googleapis.com/auth/analytics.readonly',adsense:'https://www.googleapis.com/auth/adsense.readonly'};
  if(!selected.length||selected.some(x=>!scopeByProvider[x]))throw new Error('Use --providers=gsc,ga4 and add adsense only if its API is confirmed safe to use.');
  if(selected.includes('adsense')&&process.env.ADSENSE_ZERO_COST_CONFIRMED!=='true')throw new Error('AdSense consent is blocked until ADSENSE_ZERO_COST_CONFIRMED=true is set after the user verifies the Google Cloud billing configuration.');

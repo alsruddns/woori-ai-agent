@@ -11,40 +11,38 @@ API 연결은 기본 비활성화입니다. 이 프로젝트는 사용자를 대
 
 ## Windows에서 직접 OAuth 연결
 
-1. Google Cloud Console에서 로컬용 프로젝트를 선택하거나 만듭니다. Search Console API와 필요한 경우 Google Analytics Data API만 활성화하세요. 결제 계정이나 유료 서비스 활성화가 요구되면 진행하지 말고 해당 제공자를 미연결 상태로 두세요.
-2. OAuth 동의 화면을 설정하고 OAuth client 유형에서 **Desktop app**을 선택합니다. Client ID와 secret을 로컬 `.env`에만 기록합니다. 승인할 Google 계정은 Search Console 속성의 읽기 권한과 GA4 속성의 Viewer 권한을 이미 보유해야 합니다. GA4를 연결할 경우 Cloud Console에서 billing이 꺼져 있는지 확인하고 `GOOGLE_CLOUD_BILLING_DISABLED=true`, `GA4_ZERO_COST_CONFIRMED=true`를 함께 지정합니다. 확인하지 못하면 GSC만 연결하세요.
-3. 기본으로 GSC와 GA4 읽기 전용 scope만 요청합니다. PowerShell에서 아래 명령을 직접 실행하고, 터미널에 출력된 Google URL을 사용자가 열어 scope를 확인하고 승인합니다. 이 에이전트는 브라우저를 열거나 동의를 자동 승인하지 않습니다.
+1. Google Cloud Console에서 OAuth Desktop client용 프로젝트를 선택하거나 만듭니다. 결제 계정을 연결하지 말고, 결제 또는 유료 서비스가 요구되면 중단합니다. Google은 Search Console API 요청 자체를 무료라고 안내합니다(사용량 제한 적용). API 활성화 및 OAuth 설정 화면에서 결제 설정을 자동 변경하지 마세요.
+2. OAuth 동의 화면과 **Desktop app** client를 설정하고 Client ID와 secret을 로컬 `.env`에만 기록합니다. 승인할 Google 계정은 원하는 Search Console 속성의 읽기 권한을 이미 보유해야 합니다.
+3. GSC만 요청해 최소 `webmasters.readonly` scope로 사용자 동의를 받습니다. PowerShell에서 아래 명령을 직접 실행하고, 출력된 Google URL을 사용자가 열어 scope를 확인하고 승인합니다. 이 에이전트는 브라우저를 열거나 동의를 자동 승인하지 않습니다.
 
    ```powershell
-   pnpm agent:google:connect --providers=gsc,ga4
-   ```
-
-   AdSense scope는 별도 비용 검토 후 명시적으로 요청할 수 있습니다. 실행에도 `GOOGLE_CLOUD_BILLING_DISABLED=true`와 `ADSENSE_ZERO_COST_CONFIRMED=true`가 함께 필요합니다.
-
-   ```powershell
-   pnpm agent:google:connect --providers=adsense
+   pnpm agent:google:connect --providers=gsc
    ```
 
 4. 동의가 끝나면 OAuth refresh token을 Windows DPAPI로 암호화해 `data/google-oauth.dpapi`에 저장합니다. 파일은 현재 Windows 사용자 프로필에서만 복호화됩니다. Actions나 VPS로 옮기지 마세요. 토큰 값은 로그와 보고서에 출력하지 않습니다.
-5. OAuth Desktop client와 대상 식별자, 명시적 opt-in을 로컬 `.env`에 설정합니다. `.env`는 Git에 커밋하지 마세요. 이 저장소 CLI는 `.env`를 자동으로 읽으며, 이미 프로세스에 설정된 환경변수가 우선합니다.
+5. 로컬 `.env`에 OAuth client와 opt-in을 설정합니다. `GSC_SITE_URL`에 속성 주소를 임의로 입력하지 않습니다. `.env`는 Git에 커밋하지 마세요.
 
    ```dotenv
    GOOGLE_LOCAL_OAUTH_FILE=data/google-oauth.dpapi
    GOOGLE_OAUTH_CLIENT_ID=your-desktop-client-id
    GOOGLE_OAUTH_CLIENT_SECRET=your-desktop-client-secret
-   GSC_SITE_URL=sc-domain:example.com
    GSC_API_ENABLED=true
-   GA4_PROPERTY_ID=123456789
-   GA4_API_ENABLED=true
-   GA4_ZERO_COST_CONFIRMED=true
-   GOOGLE_CLOUD_BILLING_DISABLED=true
-   ADSENSE_ACCOUNT_ID=accounts/pub-1234567890
-   ADSENSE_API_ENABLED=false
-   ADSENSE_ZERO_COST_CONFIRMED=false
    ```
 
-6. `pnpm agent analytics --service=all` 또는 `pnpm agent ads --service=all`을 직접 실행합니다. 오류·쿼터 초과는 Failed/Skipped로 기록하고 재시도하지 않습니다. API 원본 응답·집계·캐시는 `data/woori-agent.sqlite`의 `agent_data`, `analytics_daily`, `api_cache`, `api_usage`에 저장됩니다.
-7. 연결을 끊으려면 제공자별 API 설정을 `false`로 변경하고 Google 계정의 앱 연결에서 동의를 취소하세요. 필요하면 DPAPI 파일과 SQLite 분석 데이터/캐시를 사용자가 직접 지웁니다.
+6. Search Console API에서 사용 권한이 있는 실제 속성을 조회하고, 응답에 나온 `siteUrl`을 사용자가 선택합니다. Domain Property (`sc-domain:...`)와 URL-prefix Property를 모두 지원하며, woori.today와 관련된 실제 반환 속성만 선택할 수 있습니다.
+
+   ```powershell
+   pnpm agent gsc properties
+   pnpm agent gsc select --site-url="https://www.woori.today/"
+   pnpm agent gsc run --range=28d
+   # 선택 가능: 7d, 28d, previous28d, custom
+   pnpm agent gsc run --range=custom --start-date=2026-09-01 --end-date=2026-09-30
+   ```
+
+   예시 URL은 형식 설명일 뿐입니다. `select`에는 반드시 `properties` 응답에 실제로 반환된 문자열을 복사하세요. 첫 Search Analytics 실행은 최대 7개의 순차 요청, 하루 최대 12개 GSC 요청(속성 조회 포함), 6시간 캐시, 최대 250행/차원을 사용합니다. 제한에 걸리면 재시도하지 않고 중단합니다. Google은 Search Console 성과 데이터가 일반적으로 2–3일 후 제공되며, page/query 그룹에서 일부 데이터가 생략될 수 있다고 안내합니다. 보고서는 마지막 3일을 기본 제외하고 행 제한에 도달하면 부분 응답으로 표시합니다.
+
+7. SQLite의 `gsc_properties`, `gsc_report_sets`, `gsc_report_rows`, `analytics_daily`, `agent_data`, `api_cache`, `api_usage`에 실제 응답 및 상태를 저장합니다. GitHub Actions는 OAuth 토큰을 받지 않으며 GSC 인증·수집을 실행하지 않습니다.
+8. 연결을 끊으려면 `GSC_API_ENABLED=false`로 바꾸고 Google 계정에서 앱 동의를 취소하세요. 필요하면 DPAPI 파일과 SQLite 분석 데이터/캐시를 사용자가 직접 지웁니다.
 
 ## 대체 인증: 서비스 계정
 

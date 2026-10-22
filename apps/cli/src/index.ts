@@ -8,6 +8,7 @@ import {assertNoPaidAiApi,getAiPolicy} from './ai-policy.js';
 import {writeCodexPrompts} from './codex-prompts.js';
 import {reviewContent,comparePageMetadata,writeGrowthIdeas} from './rule-agents.js';
 import {analyzeCompetitors,buildGrowthCandidates,googleReport,inspectContentAndAds} from './free-analysis.js';
+import {discoverGscProperties,gscReport,selectGscProperty} from './google-analytics.js';
 import {aggregateRunStatus} from './run-status.js';
 import {applyCalculatorKnownIssues,recordIssueLifecycle} from './issue-tracker.js';
 
@@ -23,6 +24,13 @@ const runId=new Date().toISOString().replace(/[:.]/g,'-')+'-'+randomUUID().slice
 const configured=new Set(['qa','seo','content','growth','change','localization','performance','improvement','competitor','ads']);
 async function main(){
  assertNoPaidAiApi();
+ if(command==='gsc'){
+  const subcommand=args[1]??'run';
+  if(subcommand==='properties'){const result=await discoverGscProperties(runId);console.log(JSON.stringify(result,null,2));if(result.status==='Failed')process.exitCode=1;return;}
+  if(subcommand==='select'){const siteUrl=option('site-url','');if(!siteUrl)throw new Error('Use `pnpm agent gsc select --site-url=<exact siteUrl from properties>`; the application never guesses properties.');console.log(`Selected Search Console property: ${selectGscProperty(siteUrl)}`);return;}
+  if(subcommand==='run'){const result=await gscReport(runId);console.log(JSON.stringify(result,null,2));if(result.status==='Failed')process.exitCode=1;return;}
+  throw new Error('GSC commands: properties | select --site-url=<exact API property> | run --range=7d|28d|previous28d|custom');
+ }
  if(command==='help'){console.log(`Woori AI Agent\nCommands: discover | smoke | qa | seo | content | competitor | growth | ux | performance | localization | ads | change | analytics | improvement | all | report | status\nOptions: --service=all|home|calculator|tools|money|docs|quiz --profile=daily|weekly|monthly|changed --max-pages=50`);return;}
  if(command==='explore'){console.error('Not Configured: no autonomous model API is permitted. Use the user-run Codex interactive session with Playwright MCP; no browser actions were attempted.');process.exitCode=2;return;}
  if(command==='status'){console.log(JSON.stringify({services:config.services.map(s=>({id:s.id,label:s.label})),agents:agents.map(a=>({id:a,status:configured.has(a)?'Ready':'Not Configured'})),aiPolicy:getAiPolicy(),paidAi:'Not Configured (prohibited)'},null,2));return;}
