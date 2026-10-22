@@ -19,7 +19,8 @@ export function recordIssueLifecycle(runId:string,findings:Finding[],checkedUrls
  const event=db.prepare('INSERT INTO issue_events(fingerprint,run_id,event,occurred_at,detail) VALUES(?,?,?,?,?)');
  const transaction=db.transaction(()=>{
   for(const item of findings.filter(x=>x.status==='confirmed'||x.status.startsWith('Known Issue'))){
-   const fingerprint=createHash('sha256').update([item.service,item.url,item.agent,item.title.trim().toLowerCase()].join('|')).digest('hex');current.add(fingerprint);
+   let detailKey='';if(item.title.startsWith('Accessibility: ')&&item.evidence){try{const parsed=JSON.parse(item.evidence) as {selectors?:string[]};detailKey=(parsed.selectors??[]).slice().sort().join('|');}catch{detailKey=item.evidence}}
+   const fingerprint=createHash('sha256').update([item.service,item.url,item.agent,item.title.trim().toLowerCase(),detailKey].join('|')).digest('hex');current.add(fingerprint);
    const previous=find.get(fingerprint) as {state:string;occurrences:number}|undefined;
    const known=item.status.startsWith('Known Issue');const state=known?'Known Issue':!previous?'New':previous.state==='Resolved'?'Recurred':'Existing';
    put.run({fingerprint,service:item.service,url:item.url,agent:item.agent,severity:item.severity,title:item.title,state,first_seen:now,last_seen:now,resolved_at:null,occurrences:(previous?.occurrences??0)+1,evidence:item.evidence??item.description});
