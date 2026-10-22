@@ -40,8 +40,8 @@ describe('zero-cost AI policy', () => {
     const source = fs.readdirSync(path.join(root, 'apps/cli/src')).filter(name => name.endsWith('.ts')).map(name => fs.readFileSync(path.join(root, 'apps/cli/src', name), 'utf8')).join('\n').toLowerCase();
     expect(source).not.toMatch(/api\.openai\.com|api\.anthropic\.com|generativelanguage\.googleapis\.com/);
     const workflow = fs.readFileSync(path.join(root, '.github/workflows/scheduled-audit.yml'), 'utf8');
-    expect(workflow).toContain("PAID_AI_API_ENABLED: 'false'");
-    expect(workflow).toContain("AI_API_BUDGET_USD: '0'");
-    expect(workflow).toContain("AI_AUTO_EXECUTION: 'false'");
+    expect(workflow).toMatch(/PAID_AI_API_ENABLED:\s*["']false["']/);
+    expect(workflow).toMatch(/AI_API_BUDGET_USD:\s*["']0["']/);
+    expect(workflow).toMatch(/AI_AUTO_EXECUTION:\s*["']false["']/);
   });
 });

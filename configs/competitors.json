@@ -1,5 +1,12 @@
 {
   "maxPagesPerDomain": 3,
   "requestDelayMs": 1500,
-  "competitors": []
+  "competitors": [
+    {"id":"our-world-in-data","name":"Our World in Data","baseUrl":"https://ourworldindata.org/","serviceIds":["home"],"enabled":false,"termsReviewedAt":"","manualFeatures":[],"manualSource":"","manualReviewedAt":""},
+    {"id":"calculator-net","name":"Calculator.net","baseUrl":"https://www.calculator.net/","serviceIds":["calculator"],"enabled":false,"termsReviewedAt":"","manualFeatures":[],"manualSource":"","manualReviewedAt":""},
+    {"id":"jsonformatter","name":"JSONFormatter","baseUrl":"https://jsonformatter.org/","serviceIds":["tools"],"enabled":false,"termsReviewedAt":"","manualFeatures":[],"manualSource":"","manualReviewedAt":""},
+    {"id":"goodbudget","name":"Goodbudget","baseUrl":"https://goodbudget.com/","serviceIds":["money"],"enabled":false,"termsReviewedAt":"","manualFeatures":[],"manualSource":"","manualReviewedAt":""},
+    {"id":"smartsheet-templates","name":"Smartsheet templates","baseUrl":"https://www.smartsheet.com/content/pdf-project-management-templates","serviceIds":["docs"],"enabled":false,"termsReviewedAt":"","manualFeatures":[],"manualSource":"","manualReviewedAt":""},
+    {"id":"jetpunk","name":"JetPunk","baseUrl":"https://www.jetpunk.com/popular-quiz-categories.php","serviceIds":["quiz"],"enabled":false,"termsReviewedAt":"","manualFeatures":[],"manualSource":"","manualReviewedAt":""}
+  ]
 }

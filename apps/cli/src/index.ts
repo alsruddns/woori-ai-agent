@@ -29,11 +29,15 @@ async function main(){
  if(command==='report'){const db=(await import('./core.js')).initDb();const run=db.prepare('SELECT id,mode FROM runs ORDER BY started_at DESC LIMIT 1').get() as {id:string;mode:string}|undefined;if(!run){console.log('No completed scan is available yet.');return;}const checks=db.prepare('SELECT url,service,locale,status,title,description,canonical,html_lang AS htmlLang,hreflang_count AS hreflangCount,h1_count AS h1Count,errors FROM checks WHERE run_id=?').all(run.id) as Check[];const findings=db.prepare('SELECT id,service,url,locale,agent,severity,status,title,description,evidence FROM findings WHERE run_id=?').all(run.id) as Finding[];console.log(`Report: ${writeReports(run.id,run.mode,checks.map(c=>({...c,links:[],errors:JSON.parse(String(c.errors??'[]'))})),findings)}`);db.close();return;}
  const discovery=await discover(limit,allowedService);
  let candidates=discovery.availableUrls.filter(u=>allowedService==='all'||serviceFor(u).id===allowedService);
- if(profile==='monthly')candidates=candidates.slice(0,limit);
+ const inspectedHistory=new Map((discovery.db.prepare('SELECT url,MAX(checked_at) checkedAt FROM checks GROUP BY url').all() as Array<{url:string;checkedAt:string|null}>).map(x=>[x.url,x.checkedAt??'']));
+ const sitemapHistory=new Map((discovery.db.prepare('SELECT url,sitemap_lastmod AS lastmod FROM discovered_urls WHERE sitemap_lastmod IS NOT NULL').all() as Array<{url:string;lastmod:string}>).map(x=>[x.url,x.lastmod]));
+ const changed=(url:string)=>{const lastmod=sitemapHistory.get(url),checked=inspectedHistory.get(url);if(!lastmod)return false;if(!checked)return true;return lastmod.length===10?lastmod>checked.slice(0,10):Date.parse(lastmod)>Date.parse(checked);};
+ const oldestFirst=(a:string,b:string)=>Number(changed(b))-Number(changed(a))||(inspectedHistory.get(a)??'').localeCompare(inspectedHistory.get(b)??'')||a.localeCompare(b);
+ if(profile==='monthly')candidates=candidates.sort(oldestFirst).slice(0,limit);
  else if(profile==='changed'){
    const cutoff=new Date(Date.now()-24*60*60*1000).toISOString();
    const recent=new Set((discovery.db.prepare('SELECT url FROM checks GROUP BY url HAVING MAX(checked_at)>=?').all(cutoff) as Array<{url:string}>).map(x=>x.url));
-   candidates=candidates.filter(u=>!recent.has(u)).slice(0,limit);
+   candidates=candidates.filter(u=>!recent.has(u)||changed(u)).sort(oldestFirst).slice(0,limit);
  }else candidates=discovery.selected.filter(u=>allowedService==='all'||serviceFor(u).id===allowedService).slice(0,limit);
  discovery.db.close();
  let chosen=candidates;

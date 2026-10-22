@@ -2,12 +2,24 @@ name: Woori website audit
 on:
   workflow_dispatch:
     inputs:
-      profile: {description: Inspection profile, type: choice, options: [daily, weekly, monthly, changed], default: daily}
-      service: {description: Service ID, type: choice, options: [all, home, calculator, tools, money, docs, quiz], default: all}
+      profile:
+        {
+          description: Inspection profile,
+          type: choice,
+          options: [daily, weekly, monthly, changed],
+          default: daily,
+        }
+      service:
+        {
+          description: Service ID,
+          type: choice,
+          options: [all, home, calculator, tools, money, docs, quiz],
+          default: all,
+        }
   schedule:
-    - cron: '0 21 * * *' # 06:00 KST
-    - cron: '0 21 * * 0' # weekly Sunday 06:00 KST
-    - cron: '0 21 1 * *' # monthly 06:00 KST
+    - cron: "0 21 * * *" # daily 06:00 KST
+    - cron: "15 21 * * 0" # weekly Sunday 06:15 KST
+    - cron: "30 21 1 * *" # monthly 1st 06:30 KST
 permissions:
   contents: read
 concurrency:
@@ -18,28 +30,30 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      PAID_AI_API_ENABLED: 'false'
-      AI_API_BUDGET_USD: '0'
-      AI_AUTO_EXECUTION: 'false'
-      GSC_API_ENABLED: 'false'
-      GA4_API_ENABLED: 'false'
-      ADSENSE_API_ENABLED: 'false'
+      PAID_AI_API_ENABLED: "false"
+      AI_API_BUDGET_USD: "0"
+      AI_AUTO_EXECUTION: "false"
+      GSC_API_ENABLED: "false"
+      GA4_API_ENABLED: "false"
+      GA4_ZERO_COST_CONFIRMED: "false"
+      ADSENSE_API_ENABLED: "false"
+      ADSENSE_ZERO_COST_CONFIRMED: "false"
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with: {version: 9.12.1}
-      - uses: actions/setup-node@v4
-        with: {node-version: 20, cache: pnpm}
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with: { version: 9.12.1 }
+      - uses: actions/setup-node@v7
+        with: { node-version: 24, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck && pnpm lint && pnpm test && pnpm build
       - run: pnpm exec playwright install --with-deps chromium
-      - run: pnpm agent audit --profile=${{ github.event_name == 'schedule' && github.event.schedule == '0 21 * * *' && 'daily' || github.event_name == 'schedule' && github.event.schedule == '0 21 * * 0' && 'weekly' || github.event_name == 'schedule' && 'monthly' || inputs.profile || 'daily' }} --service=${{ inputs.service || 'all' }}
+      - run: pnpm agent audit --profile=${{ github.event_name == 'schedule' && github.event.schedule == '0 21 * * *' && 'daily' || github.event_name == 'schedule' && github.event.schedule == '15 21 * * 0' && 'weekly' || github.event_name == 'schedule' && 'monthly' || inputs.profile || 'daily' }} --service=${{ inputs.service || 'all' }} --max-pages=${{ github.event_name == 'schedule' && github.event.schedule == '0 21 * * *' && '6' || github.event_name == 'schedule' && github.event.schedule == '15 21 * * 0' && '24' || github.event_name == 'schedule' && '200' || '6' }}
         env:
           REQUEST_DELAY_MS: 1000
           AGENT_MAX_RUN_MS: 900000
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: woori-audit-${{ github.run_id }}
           path: reports/
-          retention-days: 30
+          retention-days: 14
