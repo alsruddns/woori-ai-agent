@@ -6,3 +6,4 @@ reports/**
 !reports/.gitkeep
 playwright-report/
 test-results/
+.tmp-action-artifact/
