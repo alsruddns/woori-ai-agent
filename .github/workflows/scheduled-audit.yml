@@ -43,7 +43,8 @@ jobs:
       - uses: pnpm/action-setup@v6
         with: { version: 9.12.1 }
       - uses: actions/setup-node@v7
-        with: { node-version: 24, cache: pnpm }
+        # Native better-sqlite3 is stable on Node 22; the maintained Actions themselves use Node 24.
+        with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck && pnpm lint && pnpm test && pnpm build
       - run: pnpm exec playwright install --with-deps chromium
