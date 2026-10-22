@@ -1,0 +1,85 @@
+{
+  "inventoryCheckedAt": "2026-10-22",
+  "workspaceRoot": "C:/Users/achie/git",
+  "excludedServices": [
+    {
+      "id": "money",
+      "name": "money-book",
+      "reason": "Read-only QA only; automatic code changes, PRs and deployment are prohibited."
+    }
+  ],
+  "services": [
+    {
+      "id": "home",
+      "name": "woori-home",
+      "repositoryUrl": "https://github.com/alsruddns/woori-home.git",
+      "localPath": "C:/Users/achie/git/woori-home",
+      "stack": ["Next.js", "TypeScript", "pnpm"],
+      "observedBranch": "main",
+      "observedDirtyFiles": 0,
+      "commands": { "lint": "pnpm lint", "test": "pnpm test", "build": "pnpm build" },
+      "deploymentWorkflow": ".github/workflows/publish.yml",
+      "codeAutomationEnabled": false,
+      "autoDeployEnabled": false,
+      "writeLocked": false
+    },
+    {
+      "id": "calculator",
+      "name": "woori-calculator",
+      "repositoryUrl": "https://github.com/alsruddns/woori-calculator.git",
+      "localPath": "C:/Users/achie/git/woori-calculator",
+      "stack": ["Next.js", "TypeScript", "pnpm"],
+      "observedBranch": "develop",
+      "observedDirtyFiles": 4,
+      "commands": { "lint": "pnpm lint", "test": "pnpm test", "build": "pnpm build", "typecheck": "pnpm typecheck" },
+      "deploymentWorkflow": ".github/workflows/deploy.yml",
+      "codeAutomationEnabled": false,
+      "autoDeployEnabled": false,
+      "writeLocked": true,
+      "lockReason": "User-protected ongoing multilingual expansion; do not create or switch a development worktree until explicitly unlocked."
+    },
+    {
+      "id": "tools",
+      "name": "woori-tools",
+      "repositoryUrl": "https://github.com/alsruddns/woori-tools.git",
+      "localPath": "C:/Users/achie/git/woori-tools",
+      "stack": ["Next.js", "TypeScript", "pnpm"],
+      "observedBranch": "develop",
+      "observedDirtyFiles": 3,
+      "commands": { "lint": "pnpm lint", "test": "pnpm test", "build": "pnpm build", "catalog": "pnpm check:service-catalog" },
+      "deploymentWorkflow": ".github/workflows/deploy.yml",
+      "codeAutomationEnabled": false,
+      "autoDeployEnabled": false,
+      "writeLocked": false,
+      "runtimeLockReason": "Read-only status showed 3 existing modified files; execution must recheck for a clean worktree before any task."
+    },
+    {
+      "id": "docs",
+      "name": "woori-docs",
+      "repositoryUrl": "https://github.com/alsruddns/woori-docs.git",
+      "localPath": "C:/Users/achie/git/woori-docs",
+      "stack": ["Next.js", "TypeScript", "pnpm"],
+      "observedBranch": "develop",
+      "observedDirtyFiles": 0,
+      "commands": { "lint": "pnpm lint", "test": "pnpm test", "build": "pnpm build" },
+      "deploymentWorkflow": ".github/workflows/deploy.yml",
+      "codeAutomationEnabled": false,
+      "autoDeployEnabled": false,
+      "writeLocked": false
+    },
+    {
+      "id": "quiz",
+      "name": "woori-quiz",
+      "repositoryUrl": "https://github.com/alsruddns/woori-quiz.git",
+      "localPath": "C:/Users/achie/git/woori-quiz",
+      "stack": ["Next.js", "TypeScript", "pnpm"],
+      "observedBranch": "main",
+      "observedDirtyFiles": 0,
+      "commands": { "lint": "pnpm lint", "test": "pnpm test", "build": "pnpm build", "localization": "pnpm check:localization-quality" },
+      "deploymentWorkflow": ".github/workflows/deploy.yml",
+      "codeAutomationEnabled": false,
+      "autoDeployEnabled": false,
+      "writeLocked": false
+    }
+  ]
+}

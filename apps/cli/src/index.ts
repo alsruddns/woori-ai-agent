@@ -11,6 +11,8 @@ import {analyzeCompetitors,buildGrowthCandidates,googleReport,inspectContentAndA
 import {discoverGscProperties,gscReport,selectGscProperty} from './google-analytics.js';
 import {aggregateRunStatus} from './run-status.js';
 import {applyCalculatorKnownIssues,recordIssueLifecycle} from './issue-tracker.js';
+import {runAdSenseApprovalAudit} from './adsense-approval.js';
+import {developmentEnvironment,discoverDevelopmentTasks,dryRunDevelopmentTask,enqueueDevelopmentTask,listDevelopmentTasks,listDevelopmentRepositories,transitionDevelopmentTask,updateDevelopmentSettings,type DevelopmentStatus} from './development-orchestrator.js';
 
 const args=process.argv.slice(2); const command=args[0]??'help';
 const option=(name:string,fallback:string)=>args.find(a=>a.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
@@ -18,8 +20,8 @@ const allowedService=option('service','all').toLowerCase();
 const inspection=JSON.parse(fs.readFileSync('configs/inspection-strategy.json','utf8')) as {daily:{maxBrowserPages:number};weekly:{maxBrowserPages:number};monthly:{maxMetadataPages:number};changed:{maxBrowserPages:number}};
 const profile=option('profile','daily');
 const profileLimit=profile==='weekly'?inspection.weekly.maxBrowserPages:profile==='monthly'?inspection.monthly.maxMetadataPages:profile==='changed'?inspection.changed.maxBrowserPages:inspection.daily.maxBrowserPages;
-const defaultLimit=Math.min(profileLimit,Math.max(1,Number(process.env.MAX_PAGES??profileLimit)));
-const limit=Math.max(1,Math.min(200,Number(option('max-pages',String(defaultLimit)))));
+const defaultLimit=Math.min(command==='adsense-approval'?48:profileLimit,Math.max(1,Number(process.env.MAX_PAGES??(command==='adsense-approval'?24:profileLimit))));
+const limit=Math.max(1,Math.min(command==='adsense-approval'?48:200,Number(option('max-pages',String(defaultLimit)))));
 const runId=new Date().toISOString().replace(/[:.]/g,'-')+'-'+randomUUID().slice(0,8);
 const configured=new Set(['qa','seo','content','growth','change','localization','performance','improvement','competitor','ads']);
 async function main(){
@@ -31,11 +33,30 @@ async function main(){
   if(subcommand==='run'){const result=await gscReport(runId);console.log(JSON.stringify(result,null,2));if(result.status==='Failed')process.exitCode=1;return;}
   throw new Error('GSC commands: properties | select --site-url=<exact API property> | run --range=7d|28d|previous28d|custom');
  }
- if(command==='help'){console.log(`Woori AI Agent\nCommands: discover | smoke | qa | seo | content | competitor | growth | ux | performance | localization | ads | change | analytics | improvement | all | report | status\nOptions: --service=all|home|calculator|tools|money|docs|quiz --profile=daily|weekly|monthly|changed --max-pages=50`);return;}
+ if(command==='development'){
+  const action=args[1]??'status';
+  if(action==='status'||action==='doctor'){console.log(JSON.stringify(developmentEnvironment(),null,2));return;}
+  if(action==='repositories'){console.log(JSON.stringify(listDevelopmentRepositories(),null,2));return;}
+  if(action==='settings'){const service=option('service',''),code=option('code','off')==='on',deploy=option('deploy','off')==='on';console.log(JSON.stringify(updateDevelopmentSettings(service,code,deploy),null,2));return;}
+  if(action==='queue'){const discovered=option('discover','false')==='true'?discoverDevelopmentTasks():null;console.log(JSON.stringify({discovered,...listDevelopmentTasks()},null,2));return;}
+  if(action==='add'){const result=enqueueDevelopmentTask({service:option('service',''),title:option('title',''),kind:option('kind','manual-review'),priority:option('priority','Medium') as 'Critical'|'High'|'Medium'|'Low',evidence:option('evidence',''),acceptanceCriteria:option('acceptance',''),sourceAgent:'manual'});console.log(JSON.stringify(result,null,2));return;}
+  if(action==='transition'){const taskId=option('task-id',''),next=option('to','Triaged') as DevelopmentStatus;console.log(JSON.stringify(transitionDevelopmentTask(taskId,next),null,2));return;}
+  if(action==='run'){const result=dryRunDevelopmentTask(option('task-id',''));console.log(JSON.stringify(result,null,2));if(!result.wouldExecute)process.exitCode=2;return;}
+  throw new Error('Development commands: status | doctor | repositories | queue [--discover=true] | add --service --title --evidence --acceptance | transition --task-id --to | run --task-id (dry-run only)');
+ }
+ if(command==='help'){console.log(`Woori AI Agent\nCommands: discover | smoke | qa | seo | content | competitor | growth | ux | performance | localization | ads | adsense-approval | development | change | analytics | improvement | all | report | status\nOptions: --service=all|home|calculator|tools|money|docs|quiz --profile=daily|weekly|monthly|changed --max-pages=50`);return;}
  if(command==='explore'){console.error('Not Configured: no autonomous model API is permitted. Use the user-run Codex interactive session with Playwright MCP; no browser actions were attempted.');process.exitCode=2;return;}
  if(command==='status'){console.log(JSON.stringify({services:config.services.map(s=>({id:s.id,label:s.label})),agents:agents.map(a=>({id:a,status:configured.has(a)?'Ready':'Not Configured'})),aiPolicy:getAiPolicy(),paidAi:'Not Configured (prohibited)'},null,2));return;}
  if(command==='report'){const db=(await import('./core.js')).initDb();const run=db.prepare('SELECT id,mode FROM runs ORDER BY started_at DESC LIMIT 1').get() as {id:string;mode:string}|undefined;if(!run){console.log('No completed scan is available yet.');return;}const checks=db.prepare('SELECT url,service,locale,status,title,description,canonical,html_lang AS htmlLang,hreflang_count AS hreflangCount,h1_count AS h1Count,errors FROM checks WHERE run_id=?').all(run.id) as Check[];const findings=db.prepare('SELECT id,service,url,locale,agent,severity,status,title,description,evidence FROM findings WHERE run_id=?').all(run.id) as Finding[];console.log(`Report: ${writeReports(run.id,run.mode,checks.map(c=>({...c,links:[],errors:JSON.parse(String(c.errors??'[]'))})),findings)}`);db.close();return;}
  const discovery=await discover(limit,allowedService);
+ if(command==='adsense-approval'){
+  discovery.db.close();startRun(runId,command,discovery.total);
+  const result=await runAdSenseApprovalAudit(runId,discovery.availableUrls,limit);
+  const failed=result.snapshots.filter(page=>!page.status||page.status>=400).length;
+  finishRun(runId,failed?'Failed':'Completed',result.snapshots.length,failed,0);
+  console.log(JSON.stringify({runId,status:result.status,discovered:discovery.total,checked:result.snapshots.length,selected:result.selected,services:[...new Set(result.snapshots.map(page=>page.service))],findings:result.issues.length,reportDir:result.reportDir},null,2));
+  if(failed)process.exitCode=1;return;
+ }
  let candidates=discovery.availableUrls.filter(u=>allowedService==='all'||serviceFor(u).id===allowedService);
  const inspectedHistory=new Map((discovery.db.prepare('SELECT url,MAX(checked_at) checkedAt FROM checks GROUP BY url').all() as Array<{url:string;checkedAt:string|null}>).map(x=>[x.url,x.checkedAt??'']));
  const sitemapHistory=new Map((discovery.db.prepare('SELECT url,sitemap_lastmod AS lastmod FROM discovered_urls WHERE sitemap_lastmod IS NOT NULL').all() as Array<{url:string;lastmod:string}>).map(x=>[x.url,x.lastmod]));
@@ -67,6 +88,12 @@ async function main(){
    else if(agent==='ads'){const adsUrls=chosen.slice(0,Math.min(5,limit));const pageScan=await inspect(adsUrls,runId,'ads');checks.push(...pageScan.checks);const results=await inspectContentAndAds(runId,adsUrls);const revenue=await googleReport('adsense',runId);statuses[agent]=revenue.status==='Failed'?'Failed':results.ads.length?'Completed':revenue.status;}
    else if(agent==='improvement'){const core=await import('./core.js');const d=core.initDb();const all=d.prepare('SELECT id,run_id AS runId,service,url,locale,agent,severity,status,title,description,evidence FROM findings ORDER BY rowid DESC LIMIT 200').all() as Finding[];const integrated=d.prepare("SELECT agent,service,status,source,updated_at,payload FROM agent_data WHERE agent<>'improvement' ORDER BY updated_at DESC LIMIT 100").all().map((r:any)=>({...r,payload:JSON.parse(r.payload)}));d.close();const unique=new Map<string,Finding>();for(const f of all){const key=`${f.service}|${f.url}|${f.title.toLowerCase()}`;if(!unique.has(key))unique.set(key,f)}const items=[...unique.values()].map(f=>({...f,userImpact:f.severity==='Critical'||f.severity==='High'?'Potentially blocks or degrades a key user task':'Quality improvement; validate with users',scope:'Inspect the affected page and relevant service repository; prepare a minimal fix and regression check.',codexPrompt:`Review ${f.service} at ${f.url}. Evidence: ${f.evidence??f.description}. Propose a minimal fix and regression test. Do not modify production.`}));core.saveAgentData(runId,'improvement','Completed','SQLite findings + saved free-agent analysis',{items,sourceFindings:all.length,deduplicated:items.length,integratedAgentData:integrated,analysisSources:[...new Set(integrated.map((x:any)=>x.agent))]},allowedService);const output=writeCodexPrompts(items as Finding[],path.resolve('reports','codex-review'));console.log(`Improvement candidates: ${items.length}; integrated agent datasets: ${integrated.length}; prompts: ${output}`);statuses[agent]='Completed';}
    else statuses[agent]='Not Configured';
+ }
+ if(command==='audit'&&['daily','weekly','monthly'].includes(profile)){
+  const approvalLimit=profile==='daily'?6:profile==='weekly'?12:24;
+  const approval=await runAdSenseApprovalAudit(runId,discovery.availableUrls,Math.min(limit,approvalLimit));
+  statuses.adsenseApproval=approval.status;
+  console.log(JSON.stringify({adsenseApproval:{checked:approval.snapshots.length,findings:approval.issues.length,reportDir:approval.reportDir}},null,2));
  }
  const resultsDb=(await import('./core.js')).initDb();const notCovered=(resultsDb.prepare("SELECT COUNT(*) n FROM feature_results WHERE run_id=? AND status='Not Covered'").get(runId) as {n:number}).n;const failedFeatures=(resultsDb.prepare("SELECT COUNT(*) n FROM feature_results WHERE run_id=? AND status='Failed'").get(runId) as {n:number}).n;const featureResults=resultsDb.prepare('SELECT status,COUNT(*) count FROM feature_results WHERE run_id=? GROUP BY status').all(runId);const inspected=(resultsDb.prepare('SELECT COUNT(DISTINCT url) n FROM checks WHERE run_id=?').get(runId) as {n:number}).n;const pageFailures=checks.filter(c=>c.status===null||c.status>=400).length;const highFindings=findings.filter(f=>f.severity==='Critical'||f.severity==='High').length;const failed=pageFailures+Math.max(failedFeatures,highFindings);const status=aggregateRunStatus(Boolean(failed),statuses);resultsDb.close();recordIssueLifecycle(runId,findings,checks.map(c=>c.url),[...targetAgents]);finishRun(runId,status,inspected,failed,notCovered);const dir=writeReports(runId,command,checks,findings); console.log(JSON.stringify({runId,status,statuses,checked:inspected,featureResults,findings:findings.length,report:dir},null,2));
  if(failed||Object.values(statuses).includes('Failed'))process.exitCode=1;

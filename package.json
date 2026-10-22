@@ -34,7 +34,9 @@
     "test": "vitest run",
     "lint": "eslint apps/cli/src apps/dashboard/src tests eslint.config.mjs",
     "typecheck": "tsc --noEmit",
-    "build": "pnpm --dir apps/dashboard build"
+    "build": "pnpm --dir apps/dashboard build",
+    "agent:adsense-approval": "pnpm agent adsense-approval",
+    "agent:development": "pnpm agent development status"
   },
   "dependencies": {
     "@axe-core/playwright": "^4.14.0",
