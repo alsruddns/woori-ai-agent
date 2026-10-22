@@ -1,0 +1,37 @@
+name: Woori website audit
+on:
+  workflow_dispatch:
+    inputs:
+      mode: {description: Audit mode, type: choice, options: [smoke, weekly, monthly], default: smoke}
+      service: {description: Service ID, type: choice, options: [all, home, calculator, tools, money, docs, quiz], default: all}
+  schedule:
+    - cron: '0 21 * * *' # 06:00 KST
+    - cron: '0 21 * * 0' # weekly Sunday 06:00 KST
+    - cron: '0 21 1 * *' # monthly 06:00 KST
+permissions:
+  contents: read
+concurrency:
+  group: woori-audit-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: {version: 9.12.1}
+      - uses: actions/setup-node@v4
+        with: {node-version: 20, cache: pnpm}
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm agent ${{ github.event_name == 'schedule' && github.event.schedule == '0 21 * * *' && 'smoke' || github.event_name == 'schedule' && 'all' || inputs.mode == 'smoke' && 'smoke' || 'all' }} -- --service=${{ inputs.service || 'all' }} --max-pages=12
+        env:
+          MAX_PAGES: 12
+          REQUEST_DELAY_MS: 1000
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: woori-audit-${{ github.run_id }}
+          path: reports/
+          retention-days: 30

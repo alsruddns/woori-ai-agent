@@ -1,0 +1,50 @@
+{
+  "name": "woori-ai-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local and GitHub Actions website intelligence for woori.today",
+  "packageManager": "pnpm@9.12.1",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "agent": "tsx apps/cli/src/index.ts",
+    "agent:discover": "pnpm agent discover",
+    "agent:all": "pnpm agent all",
+    "agent:qa": "pnpm agent qa",
+    "agent:seo": "pnpm agent seo",
+    "agent:content": "pnpm agent content",
+    "agent:competitor": "pnpm agent competitor",
+    "agent:growth": "pnpm agent growth",
+    "agent:ux": "pnpm agent ux",
+    "agent:performance": "pnpm agent performance",
+    "agent:i18n": "pnpm agent localization",
+    "agent:ads": "pnpm agent ads",
+    "agent:change": "pnpm agent change",
+    "agent:analytics": "pnpm agent analytics",
+    "agent:improvement": "pnpm agent improvement",
+    "agent:report": "pnpm agent report",
+    "agent:explore": "tsx apps/cli/src/index.ts explore",
+    "agent:dashboard": "pnpm --dir apps/dashboard dev",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "pnpm --dir apps/dashboard build"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "cheerio": "^1.0.0",
+    "playwright": "^1.49.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vitest": "^2.1.8"
+  }
+}

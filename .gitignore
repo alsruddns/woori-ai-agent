@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+data/*.sqlite*
+reports/**
+!reports/.gitkeep
+playwright-report/
+test-results/
