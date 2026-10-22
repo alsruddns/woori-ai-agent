@@ -1,0 +1,10 @@
+{
+  "timezone": "UTC",
+  "requestDelayMs": 1000,
+  "browserConcurrency": 1,
+  "daily": { "mode": "smoke", "maxBrowserPages": 6, "agents": ["qa", "seo", "localization"] },
+  "weekly": { "mode": "weekly", "maxBrowserPages": 24, "agents": ["qa", "seo", "content", "change", "ux"] },
+  "monthly": { "mode": "monthly", "maxMetadataPages": 200, "agents": ["seo", "content", "change"] },
+  "changed": { "mode": "changed", "maxBrowserPages": 50, "agents": ["qa", "seo", "content", "change"] },
+  "changeDetection": { "minimumIntervalHours": 24, "metadataHashFields": ["title", "description", "canonical", "h1"] }
+}

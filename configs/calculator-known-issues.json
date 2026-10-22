@@ -1,0 +1,10 @@
+{
+  "policy": "Keep visible in reports; do not modify the calculator repository. Recheck after its multilingual expansion is complete.",
+  "recordedAt": "2026-10-22",
+  "retestPlan": "After multilingual expansion, run the same cases against the current develop source and the deployed production version, reporting each independently.",
+  "issues": [
+    { "id": "calculator-compound-undefined", "service": "calculator", "feature": "compound interest", "matchUrl": "/calculators/compound-interest", "matchText": "undefined", "state": "Known Issue" },
+    { "id": "calculator-simple-interest", "service": "calculator", "feature": "simple interest", "matchUrl": "/calculators/simple-interest", "matchText": "simple interest", "state": "Known Issue" },
+    { "id": "calculator-percentage", "service": "calculator", "feature": "percentage", "matchUrl": "/calculators/percentage", "matchText": "percentage", "state": "Known Issue" }
+  ]
+}
