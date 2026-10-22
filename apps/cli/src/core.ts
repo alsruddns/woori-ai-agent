@@ -6,7 +6,7 @@ import { load } from 'cheerio';
 export type Service = { id: string; name: string; label: string; basePaths: string[]; sitemaps: string[]; pathPrefix: string; qaPaths?:string[] };
 export type Finding = { id: string; runId?:string; service: string; url: string; locale: string; agent: string; severity: 'Critical'|'High'|'Medium'|'Low'|'Info'; status: string; title: string; description: string; evidence?: string };
 export type Check = { url: string; service: string; locale: string; status: number|null; title?: string; description?: string; canonical?: string; htmlLang?: string; hreflangCount: number; h1Count: number; links: string[]; errors: string[] };
-export type FeatureResult = { runId:string; service:string; locale:string; url:string; agent:string; feature:string; status:'Passed'|'Failed'|'Not Covered'|'Skipped'; reason?:string; evidence?:string; screenshot?:string; trace?:string; durationMs?:number };
+export type FeatureResult = { runId:string; service:string; locale:string; url:string; agent:string; feature:string; status:'Passed'|'Failed'|'Known Issue'|'Inconclusive'|'Environment Failure'|'Not Covered'|'Not Configured'|'Skipped'; reason?:string; evidence?:string; screenshot?:string; trace?:string; durationMs?:number };
 export const config = JSON.parse(fs.readFileSync('configs/services.json','utf8')) as { baseUrl: string; locales: string[]; services: Service[] };
 export const agents = ['qa','seo','content','competitor','growth','ux','performance','localization','ads','change','analytics','improvement'] as const;
 

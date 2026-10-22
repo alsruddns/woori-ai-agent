@@ -1,28 +1,35 @@
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import { config, agents, discover, inspect, serviceFor, writeReports, startRun, finishRun, saveFindings, saveFeatureResults, type Check, type Finding, type FeatureResult } from './core.js';
 import { runBrowserSuite,planQaUrls } from './service-qa.js';
 import {runLighthouse} from './performance.js';
+import {assertNoPaidAiApi,getAiPolicy} from './ai-policy.js';
+import {writeCodexPrompts} from './codex-prompts.js';
+import {reviewContent,comparePageMetadata,writeGrowthIdeas} from './rule-agents.js';
 
 const args=process.argv.slice(2); const command=args[0]??'help';
 const option=(name:string,fallback:string)=>args.find(a=>a.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
 const allowedService=option('service','all').toLowerCase(); const limit=Math.max(1,Math.min(200,Number(option('max-pages',process.env.MAX_PAGES??'50'))));
 const runId=new Date().toISOString().replace(/[:.]/g,'-')+'-'+randomUUID().slice(0,8);
-const configured=new Set(['qa','seo','localization','performance']);
+const configured=new Set(['qa','seo','content','growth','change','localization','performance','improvement']);
 async function main(){
+ assertNoPaidAiApi();
  if(command==='help'){console.log(`Woori AI Agent\nCommands: discover | smoke | qa | seo | content | competitor | growth | ux | performance | localization | ads | change | analytics | improvement | all | report | status\nOptions: --service=all|home|calculator|tools|money|docs|quiz --max-pages=50`);return;}
- if(command==='status'){console.log(JSON.stringify({services:config.services.map(s=>({id:s.id,label:s.label})),agents:agents.map(a=>({id:a,status:configured.has(a)?'Ready':'Not Configured'})),aiEnabled:process.env.AI_ENABLED==='true'},null,2));return;}
+ if(command==='explore'){console.error('Not Configured: no autonomous model API is permitted. Use the user-run Codex interactive session with Playwright MCP; no browser actions were attempted.');process.exitCode=2;return;}
+ if(command==='status'){console.log(JSON.stringify({services:config.services.map(s=>({id:s.id,label:s.label})),agents:agents.map(a=>({id:a,status:configured.has(a)?'Ready':'Not Configured'})),aiPolicy:getAiPolicy(),paidAi:'Not Configured (prohibited)'},null,2));return;}
  if(command==='report'){const db=(await import('./core.js')).initDb();const run=db.prepare('SELECT id,mode FROM runs ORDER BY started_at DESC LIMIT 1').get() as {id:string;mode:string}|undefined;if(!run){console.log('No completed scan is available yet.');return;}const checks=db.prepare('SELECT url,service,locale,status,title,description,canonical,html_lang AS htmlLang,hreflang_count AS hreflangCount,h1_count AS h1Count,errors FROM checks WHERE run_id=?').all(run.id) as Check[];const findings=db.prepare('SELECT id,service,url,locale,agent,severity,status,title,description,evidence FROM findings WHERE run_id=?').all(run.id) as Finding[];console.log(`Report: ${writeReports(run.id,run.mode,checks.map(c=>({...c,links:[],errors:JSON.parse(String(c.errors??'[]'))})),findings)}`);db.close();return;}
+ if(command==='improvement'){const db=(await import('./core.js')).initDb();const findings=db.prepare('SELECT id,service,url,locale,agent,severity,status,title,description,evidence FROM findings ORDER BY rowid DESC LIMIT 100').all() as Finding[];db.close();const out=writeCodexPrompts(findings,path.resolve('reports','codex-review'));console.log(JSON.stringify({status:'Completed',mode:'rules-based prompt generation',findings:findings.length,output:out,modelApiCalls:0},null,2));return;}
  const discovery=await discover(limit,allowedService); discovery.db.close();
  const chosen=discovery.selected.filter(u=>allowedService==='all'||serviceFor(u).id===allowedService);
  console.log(`Discovered ${discovery.sitemapTotal} sitemap URLs + ${discovery.supplementalTotal} verified route URL(s); selected ${chosen.length} URL(s) (limit ${limit}).`);
  if(command==='discover'){console.log(`Stored discovered URLs in data/woori-agent.sqlite`);return;}
- if(command==='explore'){console.error('Not Configured: autonomous AI exploration requires an AI provider adapter and credentials. No browser actions were attempted.');process.exitCode=2;return;}
  const targetAgents=command==='all'?agents:command==='smoke'?['qa','seo','localization'] as const:agents.includes(command as typeof agents[number])?[command as typeof agents[number]]:[];
  if(!targetAgents.length){console.error(`Unknown command: ${command}`);process.exitCode=1;return;}
  startRun(runId,command,discovery.total);const checks:Check[]=[]; const findings:Finding[]=[]; const statuses:Record<string,string>={};
  for(const agent of targetAgents){
    if(agent==='qa'){try{const qaUrls=planQaUrls(allowedService,discovery.availableUrls,limit);console.log(`QA routes selected: ${qaUrls.length}`);const result=await runBrowserSuite(runId,qaUrls,discovery.availableUrls,limit,allowedService);checks.push(...result.checks);findings.push(...result.findings);statuses[agent]=result.features.some(x=>x.status==='Failed')?'Failed':'Completed';}catch(e){statuses[agent]='Failed';console.error(`Playwright QA failed: ${String(e)}`);}}
-   else if(agent==='seo'||agent==='localization'){let result:{checks:Check[];findings:Finding[]};if(checks.length&&['all','smoke'].includes(command)){result=metadataReview(checks,agent,runId);saveFindings(runId,result.findings);const rows:FeatureResult[]=checks.map(c=>({runId,service:c.service,locale:c.locale,url:c.url,agent,feature:agent==='seo'?'Technical SEO metadata':'Locale routing metadata',status:result.findings.some(f=>f.url===c.url)?'Failed':'Passed',evidence:`title=${Boolean(c.title)}; canonical=${Boolean(c.canonical)}; hreflang=${c.hreflangCount}; lang=${c.htmlLang??'missing'}`}));saveFeatureResults(rows);}else{result=await inspect(chosen,runId,agent);checks.push(...result.checks);}findings.push(...result.findings);statuses[agent]=result.findings.some(f=>f.severity==='Critical'||f.severity==='High')?'Failed':'Completed';}
+   else if(agent==='seo'||agent==='localization'||agent==='content'||agent==='change'){let result:{checks:Check[];findings:Finding[]};if(checks.length&&['all','smoke'].includes(command)){const newFindings=agent==='seo'||agent==='localization'?metadataReview(checks,agent,runId).findings:agent==='content'?reviewContent(runId,checks):comparePageMetadata(runId,checks);result={checks,findings:newFindings};saveFindings(runId,newFindings);if(agent==='seo'||agent==='localization'){const rows:FeatureResult[]=checks.map(c=>({runId,service:c.service,locale:c.locale,url:c.url,agent,feature:agent==='seo'?'Technical SEO metadata':'Locale routing metadata',status:result.findings.some(f=>f.url===c.url)?'Failed':'Passed',evidence:`title=${Boolean(c.title)}; canonical=${Boolean(c.canonical)}; hreflang=${c.hreflangCount}; lang=${c.htmlLang??'missing'}`}));saveFeatureResults(rows);}}else{result=await inspect(chosen,runId,agent);if(agent==='content')result.findings.push(...reviewContent(runId,result.checks));if(agent==='change')result.findings.push(...comparePageMetadata(runId,result.checks));saveFindings(runId,result.findings);}findings.push(...result.findings);statuses[agent]=result.findings.some(f=>f.severity==='Critical'||f.severity==='High')?'Failed':'Completed';}
+   else if(agent==='growth'){const output=writeGrowthIdeas(path.resolve('reports','codex-review'));console.log(`Rule-based feature hypotheses written: ${output}`);statuses[agent]='Completed';}
    else if(agent==='performance'){const result=await runLighthouse(runId,chosen.slice(0,2));saveFeatureResults(result.features);saveFindings(runId,result.findings);findings.push(...result.findings);statuses[agent]=result.features.some(f=>f.status==='Failed')?'Failed':result.features.length>0&&result.features.every(f=>f.status==='Not Covered')?'Not Covered':'Completed';}
    else statuses[agent]='Not Configured';
  }

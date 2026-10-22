@@ -5,7 +5,6 @@ on:
       mode: {description: Audit mode, type: choice, options: [smoke, weekly, monthly], default: smoke}
       service: {description: Service ID, type: choice, options: [all, home, calculator, tools, money, docs, quiz], default: all}
       max_pages: {description: Maximum pages to inspect, type: number, default: 12}
-      use_ai: {description: Use configured AI provider (currently Not Configured), type: boolean, default: false}
   schedule:
     - cron: '0 21 * * *' # 06:00 KST
     - cron: '0 21 * * 0' # weekly Sunday 06:00 KST
@@ -19,6 +18,10 @@ jobs:
   audit:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      PAID_AI_API_ENABLED: 'false'
+      AI_API_BUDGET_USD: '0'
+      AI_AUTO_EXECUTION: 'false'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -26,6 +29,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: {node-version: 20, cache: pnpm}
       - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck && pnpm lint && pnpm test && pnpm build
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm agent ${{ github.event_name == 'schedule' && github.event.schedule == '0 21 * * *' && 'smoke' || github.event_name == 'schedule' && 'all' || inputs.mode == 'smoke' && 'smoke' || 'all' }} --service=${{ inputs.service || 'all' }} --max-pages=${{ inputs.max_pages || 12 }}
         env:

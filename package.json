@@ -24,6 +24,7 @@
     "agent:analytics": "pnpm agent analytics",
     "agent:improvement": "pnpm agent improvement",
     "agent:report": "pnpm agent report",
+    "agent:repro:calculators": "node scripts/repro-calculators.mjs",
     "agent:explore": "tsx apps/cli/src/index.ts explore",
     "agent:api": "tsx apps/cli/src/server.ts",
     "agent:dashboard": "concurrently -k -s first \"pnpm agent:api\" \"pnpm --dir apps/dashboard dev\"",

@@ -26,4 +26,4 @@ codex mcp list
 
 ## 실행 환경
 
-MCP가 현재 Codex 대화에 연결된 경우 Codex 도구 패널에서 Playwright MCP 브라우저 도구를 직접 사용한다. 이 기능은 GitHub Actions의 무인 실행을 의미하지 않는다. CI의 정기 검사는 `pnpm agent smoke` 또는 workflow_dispatch로 실행하는 규칙 기반 검사다. 무인 AI 기능은 별도의 모델 어댑터, 인증, 호출량·비용 상한이 갖춰지기 전까지 `Not Configured`다.
+MCP가 현재 Codex 대화에 실제 연결된 경우에만 Codex 도구 패널에서 Playwright MCP 브라우저 도구를 직접 사용한다. 패키지 CLI 도움말이나 MCP 설정 목록만으로 연결을 완료했다고 판단하지 않는다. 이 기능은 GitHub Actions의 무인 실행을 의미하지 않는다. CI의 정기 검사는 `pnpm agent smoke` 또는 workflow_dispatch로 실행하는 무료 규칙 기반 검사다. 유료 AI 모델 API는 프로젝트 정책상 지원하지 않으며, Codex는 사용자의 기존 플랜 내 대화형 세션에서만 사용한다.
