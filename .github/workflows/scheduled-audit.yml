@@ -118,7 +118,7 @@ jobs:
           import fs from 'node:fs'; import path from 'node:path';
           const walk=d=>fs.existsSync(d)?fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(path.join(d,e.name)):[path.join(d,e.name)]):[];
           const reports=walk('reports').filter(f=>f.endsWith('summary.json')).sort((a,b)=>fs.statSync(b).mtimeMs-fs.statSync(a).mtimeMs);
-          if(reports.length){const keep=path.dirname(reports[0]);for(const entry of fs.readdirSync('reports')){const target=path.resolve('reports',entry);if(!keep.startsWith(target+path.sep)&&keep!==target)fs.rmSync(target,{recursive:true,force:true});}}
+          if(reports.length){const root=path.resolve('reports'),keep=path.resolve(path.dirname(reports[0]));for(const entry of fs.readdirSync(root)){const target=path.resolve(root,entry);if(!keep.startsWith(target+path.sep)&&keep!==target)fs.rmSync(target,{recursive:true,force:true});}}
           NODE
       - name: Checkpoint SQLite before upload
         if: always()
