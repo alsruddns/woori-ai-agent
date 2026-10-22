@@ -3,6 +3,18 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { load } from 'cheerio';
 
+function loadLocalEnv(){
+  if(!fs.existsSync('.env'))return;
+  for(const raw of fs.readFileSync('.env','utf8').split(/\r?\n/)){
+    const line=raw.trim();if(!line||line.startsWith('#'))continue;
+    const match=line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);if(!match)continue;
+    const key=match[1]!,source=match[2]!.trim();if(process.env[key]!==undefined)continue;
+    const value=(source.startsWith('"')&&source.endsWith('"'))||(source.startsWith("'")&&source.endsWith("'"))?source.slice(1,-1):source.replace(/\s+#.*$/,'').trim();
+    process.env[key]=value.replace(/\\n/g,'\n');
+  }
+}
+loadLocalEnv();
+
 export type Service = { id: string; name: string; label: string; basePaths: string[]; sitemaps: string[]; pathPrefix: string; qaPaths?:string[] };
 export type Finding = { id: string; runId?:string; service: string; url: string; locale: string; agent: string; severity: 'Critical'|'High'|'Medium'|'Low'|'Info'; status: string; title: string; description: string; evidence?: string };
 export type Check = { url: string; service: string; locale: string; status: number|null; title?: string; description?: string; canonical?: string; htmlLang?: string; hreflangCount: number; h1Count: number; links: string[]; errors: string[] };
@@ -23,7 +35,7 @@ export function initDb() {
   const db=new Database('data/woori-agent.sqlite');
   db.pragma('journal_mode = WAL');
   db.exec(`CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, started_at TEXT NOT NULL, mode TEXT NOT NULL, status TEXT NOT NULL, finished_at TEXT, discovered_count INTEGER NOT NULL DEFAULT 0, inspected_count INTEGER NOT NULL DEFAULT 0, failed_count INTEGER NOT NULL DEFAULT 0, not_covered_count INTEGER NOT NULL DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS discovered_urls(url TEXT PRIMARY KEY, service TEXT NOT NULL, locale TEXT NOT NULL, discovered_at TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'sitemap');
+    CREATE TABLE IF NOT EXISTS discovered_urls(url TEXT PRIMARY KEY, service TEXT NOT NULL, locale TEXT NOT NULL, discovered_at TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'sitemap', sitemap_lastmod TEXT);
     CREATE TABLE IF NOT EXISTS checks(id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, url TEXT NOT NULL, service TEXT NOT NULL, locale TEXT NOT NULL, status INTEGER, title TEXT, description TEXT, canonical TEXT, html_lang TEXT, hreflang_count INTEGER, h1_count INTEGER, errors TEXT, checked_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS findings(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, service TEXT NOT NULL, url TEXT NOT NULL, locale TEXT NOT NULL, agent TEXT NOT NULL, severity TEXT NOT NULL, status TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL, evidence TEXT);
     CREATE TABLE IF NOT EXISTS feature_results(id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, service TEXT NOT NULL, locale TEXT NOT NULL, url TEXT NOT NULL, agent TEXT NOT NULL, feature TEXT NOT NULL, status TEXT NOT NULL, reason TEXT, evidence TEXT, screenshot TEXT, trace TEXT, duration_ms INTEGER, created_at TEXT NOT NULL);
@@ -39,6 +51,7 @@ export function initDb() {
     CREATE INDEX IF NOT EXISTS idx_analytics_daily_scope ON analytics_daily(provider,metric_date,service);`);
   try { db.exec('ALTER TABLE checks ADD COLUMN html_lang TEXT'); } catch { /* existing DB already migrated */ }
   try { db.exec("ALTER TABLE discovered_urls ADD COLUMN source TEXT NOT NULL DEFAULT 'sitemap'"); } catch { /* existing DB already migrated */ }
+  try { db.exec('ALTER TABLE discovered_urls ADD COLUMN sitemap_lastmod TEXT'); } catch { /* existing DB already migrated */ }
   for(const [column,definition] of [['finished_at','TEXT'],['discovered_count','INTEGER NOT NULL DEFAULT 0'],['inspected_count','INTEGER NOT NULL DEFAULT 0'],['failed_count','INTEGER NOT NULL DEFAULT 0'],['not_covered_count','INTEGER NOT NULL DEFAULT 0']] as const) try { db.exec(`ALTER TABLE runs ADD COLUMN ${column} ${definition}`); } catch { /* schema already migrated */ }
   return db;
 }
@@ -70,9 +83,9 @@ export async function fetchPage(url:string):Promise<Check> {
   return check;
 }
 export async function discover(limit=50,serviceId='all') {
-  const db=initDb(); const urls=new Set<string>();
+  const db=initDb(); const urls=new Set<string>(),lastmods=new Map<string,string>();
   for(const service of config.services) for(const sitemap of service.sitemaps) {
-    try {const res=await fetch(new URL(sitemap,config.baseUrl),{signal:AbortSignal.timeout(20000),headers:{'user-agent':'WooriSiteIntelligence/0.1 (read-only quality monitoring)'}}); if(!res.ok)continue; const xml=await res.text(); const $=load(xml,{xmlMode:true}); $('loc').each((_,el)=>{const u=$(el).text().trim(); if(u.startsWith(config.baseUrl))urls.add(u);});} catch(e) {if(process.env.DEBUG)console.warn(`Sitemap discovery skipped ${sitemap}: ${String(e)}`);}
+    try {const res=await fetch(new URL(sitemap,config.baseUrl),{signal:AbortSignal.timeout(20000),headers:{'user-agent':'WooriSiteIntelligence/0.1 (read-only quality monitoring)'}}); if(!res.ok)continue; const xml=await res.text(); const $=load(xml,{xmlMode:true}); $('url').each((_,el)=>{const u=$(el).children('loc').first().text().trim(),lastmod=$(el).children('lastmod').first().text().trim();if(u.startsWith(config.baseUrl)){urls.add(u);if(lastmod&&Number.isFinite(Date.parse(lastmod)))lastmods.set(u,lastmod);}}); $('loc').each((_,el)=>{const u=$(el).text().trim(); if(u.startsWith(config.baseUrl))urls.add(u);});} catch(e) {if(process.env.DEBUG)console.warn(`Sitemap discovery skipped ${sitemap}: ${String(e)}`);}
   }
   // Prioritize one representative route per service/locale, then fill from sitemap in source order.
   const selected:string[]=[]; const seen=new Set<string>();
@@ -82,8 +95,8 @@ export async function discover(limit=50,serviceId='all') {
   for(const locale of config.locales) for(const s of services) {if(selected.length>=limit)break;const candidate=`${config.baseUrl}/${locale}${s.pathPrefix?`/${s.pathPrefix}`:''}`; if(urls.has(candidate)&&!seen.has(candidate)){selected.push(candidate);seen.add(candidate);}}
   for(const u of urls) if(selected.length<limit&&!seen.has(u)&&(serviceId==='all'||serviceFor(u).id===serviceId)){selected.push(u);seen.add(u);}
   const supplements=new Set(config.services.flatMap(s=>(s.qaPaths??[]).map(p=>new URL(p,config.baseUrl).href)).filter(u=>!urls.has(u)));
-  const insert=db.prepare('INSERT OR REPLACE INTO discovered_urls(url,service,locale,discovered_at,source) VALUES(?,?,?,?,?)'); const now=new Date().toISOString();
-  const tx=db.transaction((items:string[],source:string)=>items.forEach(u=>insert.run(u,serviceFor(u).id,localeFor(u),now,source)));tx([...urls],'sitemap');tx([...supplements],'verified-link');
+  const insert=db.prepare('INSERT INTO discovered_urls(url,service,locale,discovered_at,source,sitemap_lastmod) VALUES(?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET service=excluded.service,locale=excluded.locale,discovered_at=excluded.discovered_at,source=excluded.source,sitemap_lastmod=COALESCE(excluded.sitemap_lastmod,discovered_urls.sitemap_lastmod)'); const now=new Date().toISOString();
+  const tx=db.transaction((items:string[],source:string)=>items.forEach(u=>insert.run(u,serviceFor(u).id,localeFor(u),now,source,lastmods.get(u)??null)));tx([...urls],'sitemap');tx([...supplements],'verified-link');
   return {total:urls.size+supplements.size,sitemapTotal:urls.size,supplementalTotal:supplements.size,selected:selected.slice(0,limit),availableUrls:[...new Set([...urls,...supplements])],db};
 }
 export async function inspect(urls:string[],runId:string,agent='qa',gap=Number(process.env.REQUEST_DELAY_MS??1000)) {

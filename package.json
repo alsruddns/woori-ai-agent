@@ -22,6 +22,7 @@
     "agent:ads": "pnpm agent ads",
     "agent:change": "pnpm agent change",
     "agent:analytics": "pnpm agent analytics",
+    "agent:google:connect": "tsx apps/cli/src/google-auth.ts",
     "agent:improvement": "pnpm agent improvement",
     "agent:report": "pnpm agent report",
     "agent:repro:calculators": "node scripts/repro-calculators.mjs",

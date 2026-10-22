@@ -1,4 +1,6 @@
 import {createSign} from 'node:crypto';
+import fs from 'node:fs';
+import {execFileSync} from 'node:child_process';
 import {initDb,readApiCache,reserveApiRequest,saveAgentData,saveAnalyticsDaily,serviceFor,writeApiCache,config} from './core.js';
 
 type Kind='gsc'|'ga4'|'adsense';
@@ -11,9 +13,16 @@ const iso=(date:Date)=>date.toISOString().slice(0,10);
 const asDate=(value:string)=>/^\d{8}$/.test(value)?`${value.slice(0,4)}-${value.slice(4,6)}-${value.slice(6,8)}`:value;
 
 async function getToken(scope:string,fetcher:typeof fetch){
- const email=process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,key=process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?.replace(/\\n/g,'\n');
- if(!email||!key)throw new Error('Not Configured: OAuth service-account credentials are missing.');
  const cached=tokens.get(scope);if(cached&&cached.expiresAt>Date.now()+60000)return cached.value;
+ const localOAuthFile=process.env.GOOGLE_LOCAL_OAUTH_FILE??'data/google-oauth.dpapi';
+ if(process.platform==='win32'&&fs.existsSync(localOAuthFile)){
+  try{const {unprotectForCurrentWindowsUser}=await import('./local-dpapi.js');const encrypted=fs.readFileSync(localOAuthFile,'utf8');const stored=JSON.parse(unprotectForCurrentWindowsUser(encrypted)) as {refreshToken:string;scopes:string[]};if(!stored.scopes.includes(scope))throw new Error('requested read-only provider scope is not in the local grant');const clientId=process.env.GOOGLE_OAUTH_CLIENT_ID,clientSecret=process.env.GOOGLE_OAUTH_CLIENT_SECRET;if(!clientId||!clientSecret)throw new Error('OAuth Desktop client id/secret are not configured');const response=await fetcher('https://oauth2.googleapis.com/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:clientId,client_secret:clientSecret,refresh_token:stored.refreshToken,grant_type:'refresh_token'}),signal:AbortSignal.timeout(15000)});if(!response.ok)throw new Error(`Google OAuth refresh returned HTTP ${response.status}`);const value=await response.json() as {access_token:string;expires_in:number};tokens.set(scope,{value:value.access_token,expiresAt:Date.now()+value.expires_in*1000});return value.access_token;}catch(error){throw new Error(`Local OAuth credentials could not be used: ${error instanceof Error?error.message:String(error)}`);}
+ }
+ let email=process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,key=process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?.replace(/\\n/g,'\n');
+ if((!email||!key)&&process.env.GOOGLE_CREDENTIALS_DPAPI_FILE&&process.platform==='win32'){
+  try{const encrypted=fs.readFileSync(process.env.GOOGLE_CREDENTIALS_DPAPI_FILE,'utf8');const script="$s=[Console]::In.ReadToEnd();$sec=ConvertTo-SecureString $s;$c=New-Object System.Management.Automation.PSCredential('local',$sec);$c.GetNetworkCredential().Password";const raw=execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',script],{input:encrypted,encoding:'utf8',windowsHide:true});const credentials=JSON.parse(raw) as {client_email?:string;private_key?:string};email=credentials.client_email;key=credentials.private_key?.replace(/\\n/g,'\n');}catch{throw new Error('Not Configured: encrypted local Google credentials could not be read with this Windows user profile.');}
+ }
+ if(!email||!key)throw new Error('Not Configured: OAuth service-account credentials are missing.');
  const now=Math.floor(Date.now()/1000),encode=(value:string)=>Buffer.from(value).toString('base64url');
  const header=encode(JSON.stringify({alg:'RS256',typ:'JWT'})),claim=encode(JSON.stringify({iss:email,scope,aud:'https://oauth2.googleapis.com/token',iat:now,exp:now+3600}));
  const signer=createSign('RSA-SHA256');signer.update(`${header}.${claim}`);const assertion=`${header}.${claim}.${signer.sign(key,'base64url')}`;
@@ -27,7 +36,10 @@ export async function googleReport(kind:Kind,runId:string,fetcher:typeof fetch=f
  const save=(status:string,source:string,payload:unknown)=>saveAgentData(runId,agent,status,source,payload);
  const notConfigured=(reason:string)=>{const payload={reason,metrics:null,requestsMade:0};save('Not Configured',`${kind} configuration`,payload);return{status:'Not Configured',payload}};
  if(env[enabledEnv[kind]]!=='true')return notConfigured('Explicit API opt-in is disabled; no provider request was made.');
- if(!id||!env.GOOGLE_SERVICE_ACCOUNT_EMAIL||!env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY)return notConfigured('OAuth service account and provider property/account identifier are required.');
+ if(kind==='ga4'&&env.GA4_ZERO_COST_CONFIRMED!=='true')return notConfigured('GA4 API is fail-closed until the user confirms billing is disabled and only quota-limited free API use is intended. No provider request was made.');
+ if(kind==='adsense'&&env.ADSENSE_ZERO_COST_CONFIRMED!=='true')return notConfigured('AdSense API is fail-closed until the user confirms the Google Cloud project has no billable services enabled. No provider request was made.');
+ const hasEnvCredentials=Boolean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL&&env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY),hasEncryptedCredentials=Boolean(env.GOOGLE_CREDENTIALS_DPAPI_FILE&&process.platform==='win32'&&fs.existsSync(env.GOOGLE_CREDENTIALS_DPAPI_FILE)),oauthFile=env.GOOGLE_LOCAL_OAUTH_FILE??'data/google-oauth.dpapi',hasLocalOAuth=process.platform==='win32'&&fs.existsSync(oauthFile);
+ if(!id||(!hasEnvCredentials&&!hasEncryptedCredentials&&!hasLocalOAuth))return notConfigured('Google OAuth credentials and provider property/account identifier are required.');
 
  const end=env.ANALYTICS_END_DATE??iso(new Date(Date.now()-86400000));
  const db=initDb();const latest=db.prepare('SELECT MAX(metric_date) date FROM analytics_daily WHERE provider=?').get(kind) as {date:string|null};db.close();
