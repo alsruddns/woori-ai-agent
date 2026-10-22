@@ -59,8 +59,9 @@ jobs:
             const response=await fetch(url,{headers:{authorization:`Bearer ${process.env.GH_TOKEN}`,accept:'application/vnd.github+json','x-github-api-version':'2022-11-28'}});
             if(!response.ok)throw new Error(`GitHub API ${response.status}`);
             const body=await response.json();const run=(body.workflow_runs??[]).filter(x=>Number(x.id)<current&&!['cancelled','skipped'].includes(x.conclusion)).sort((a,b)=>Number(b.id)-Number(a.id))[0];
-            if(run)console.log(`run_id=${run.id}`);else console.log('run_id=');
-          } catch(error) { console.log(`run_id=`); console.log(`Snapshot lookup skipped: ${error}`); }
+            if(run){await import('node:fs').then(({appendFileSync})=>appendFileSync(process.env.GITHUB_OUTPUT,`run_id=${run.id}\n`));console.log(`Selected prior audit run ${run.id}.`);}
+            else {await import('node:fs').then(({appendFileSync})=>appendFileSync(process.env.GITHUB_OUTPUT,'run_id=\n'));console.log('No prior audit run exists.');}
+          } catch(error) { await import('node:fs').then(({appendFileSync})=>appendFileSync(process.env.GITHUB_OUTPUT,'run_id=\n')); console.log(`Snapshot lookup skipped: ${error}`); }
           NODE
       - name: Download previous database snapshot
         if: steps.previous.outputs.run_id != ''
