@@ -2,11 +2,11 @@
   "baseUrl": "https://www.woori.today",
   "locales": ["ko", "en", "ja", "zh", "es", "pt-br", "de", "fr", "vi", "id", "th", "zh-tw", "it", "nl", "hi"],
   "services": [
-    {"id":"home","name":"woori-home","label":"Home","basePaths":["/{locale}"],"sitemaps":["/sitemap.xml"],"pathPrefix":""},
-    {"id":"calculator","name":"woori-calculator","label":"Calculator","basePaths":["/{locale}/calculators"],"sitemaps":["/calculator-sitemap.xml"],"pathPrefix":"calculators"},
-    {"id":"tools","name":"woori-tools","label":"Tools","basePaths":["/{locale}/tools"],"sitemaps":["/tools-sitemap.xml"],"pathPrefix":"tools"},
-    {"id":"money","name":"money-book","label":"MoneyBook","basePaths":["/{locale}/money"],"sitemaps":["/money-sitemap.xml"],"pathPrefix":"money"},
-    {"id":"docs","name":"woori-docs","label":"Docs","basePaths":["/{locale}/docs"],"sitemaps":["/docs-sitemap.xml"],"pathPrefix":"docs"},
-    {"id":"quiz","name":"woori-quiz","label":"Quiz","basePaths":["/{locale}/quiz"],"sitemaps":["/quiz-sitemap.xml"],"pathPrefix":"quiz"}
+    {"id":"home","name":"woori-home","label":"Home","basePaths":["/{locale}"],"sitemaps":["/sitemap.xml"],"pathPrefix":"","qaPaths":["/ko","/ko/world/population"]},
+    {"id":"calculator","name":"woori-calculator","label":"Calculator","basePaths":["/{locale}/calculators"],"sitemaps":["/calculator-sitemap.xml"],"pathPrefix":"calculators","qaPaths":["/ko/calculators/compound-interest","/ko/calculators/simple-interest","/ko/calculators/percentage"]},
+    {"id":"tools","name":"woori-tools","label":"Tools","basePaths":["/{locale}/tools"],"sitemaps":["/tools-sitemap.xml"],"pathPrefix":"tools","qaPaths":["/ko/tools/json-formatter","/ko/tools/lotto-number-generator","/ko/tools/wifi-qr","/ko/tools/social-image-resize"]},
+    {"id":"money","name":"money-book","label":"MoneyBook","basePaths":["/{locale}/money"],"sitemaps":["/money-sitemap.xml"],"pathPrefix":"money","qaPaths":["/ko/money","/ko/money/login"]},
+    {"id":"docs","name":"woori-docs","label":"Docs","basePaths":["/{locale}/docs"],"sitemaps":["/docs-sitemap.xml"],"pathPrefix":"docs","qaPaths":["/ko/docs","/ko/docs/expense-approval-form"]},
+    {"id":"quiz","name":"woori-quiz","label":"Quiz","basePaths":["/{locale}/quiz"],"sitemaps":["/quiz-sitemap.xml"],"pathPrefix":"quiz","qaPaths":["/ko/quiz","/ko/quiz/easy-general-knowledge"]}
   ]
 }

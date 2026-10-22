@@ -4,6 +4,8 @@ on:
     inputs:
       mode: {description: Audit mode, type: choice, options: [smoke, weekly, monthly], default: smoke}
       service: {description: Service ID, type: choice, options: [all, home, calculator, tools, money, docs, quiz], default: all}
+      max_pages: {description: Maximum pages to inspect, type: number, default: 12}
+      use_ai: {description: Use configured AI provider (currently Not Configured), type: boolean, default: false}
   schedule:
     - cron: '0 21 * * *' # 06:00 KST
     - cron: '0 21 * * 0' # weekly Sunday 06:00 KST
@@ -25,10 +27,11 @@ jobs:
         with: {node-version: 20, cache: pnpm}
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
-      - run: pnpm agent ${{ github.event_name == 'schedule' && github.event.schedule == '0 21 * * *' && 'smoke' || github.event_name == 'schedule' && 'all' || inputs.mode == 'smoke' && 'smoke' || 'all' }} -- --service=${{ inputs.service || 'all' }} --max-pages=12
+      - run: pnpm agent ${{ github.event_name == 'schedule' && github.event.schedule == '0 21 * * *' && 'smoke' || github.event_name == 'schedule' && 'all' || inputs.mode == 'smoke' && 'smoke' || 'all' }} --service=${{ inputs.service || 'all' }} --max-pages=${{ inputs.max_pages || 12 }}
         env:
-          MAX_PAGES: 12
+          MAX_PAGES: ${{ inputs.max_pages || 12 }}
           REQUEST_DELAY_MS: 1000
+          AGENT_MAX_RUN_MS: 900000
       - uses: actions/upload-artifact@v4
         if: always()
         with:

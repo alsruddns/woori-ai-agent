@@ -27,12 +27,16 @@ Use `pnpm agent <command> -- --service=home|calculator|tools|money|docs|quiz|all
 
 The production root redirects to `/ko`. Its server-rendered navigation links to `/ko/calculators`, `/ko/tools`, `/ko/money`, `/ko/docs`, and `/ko/quiz`. `robots.txt` allows public paths and disallows `/api/`; it advertises five service sitemaps plus the main sitemap. Observed URL counts: main sitemap 417, calculator 2,550, tools 2,655, money 12, docs 1,800, quiz 457, total 7,891. These are discovered sitemap entries, not inspected pages. The public locale list comes from the home sitemap and is configurable.
 
-## Current implementation boundaries
+## Phase 2 implementation status
 
-- Implemented: sitemap discovery and URL classification; SQLite run/URL/check/finding storage; rate-limited HTTP checks; Playwright Chromium smoke checks for status/runtime console errors; basic SEO metadata checks; HTML/JSON/Markdown reports; local React dashboard; scheduled workflow.
-- Agent IDs are registered, but Content, Competitor, Growth, Performance/Lighthouse, Ads, Change baselines, Analytics API and AI Improvement are `Not Configured` until their real inputs/integrations exist. Localization currently runs route metadata checks, not translation quality review. UX visual review is not automated yet.
-- Service-specific modules are currently route-aware smoke validations. Deeper calculator/tools/docs/quiz behavior and safe fixture-driven score checks remain to implement after implementation details are explored.
-- This project avoids forms, logins, account writes, ad interactions, `/api/`, and external-origin crawling. Do not enable write-capable tests against production.
+- Implemented: source-attributed discovery, read-only SQLite API and run history, service-scoped Playwright QA, axe-core accessibility, mobile overflow checks, Lighthouse mobile/desktop lab measurements, report artifacts, and dashboard filters for service/locale/run.
+- Verified representative flows: Home navigation/data cards and population link; Calculator formula interaction attempts; Tools JSON formatting/copy and lotto output; MoneyBook public/login page review without authentication; Docs search, links, and synthetic template copy; Quiz category navigation and one answer advancing the progress counter.
+- Wi-Fi QR generation and image resizing have dedicated synthetic-input checks, but this run did not expose a verifiable generated output; both remain `Not Covered` rather than being counted as successful.
+- Calculator result/edge validation fails closed: the three tested calculators currently show a client error after valid calculation input. Boundary results therefore remain `Not Covered`. Quiz result/restart remains `Not Covered`; result correctness is not inferred from UI text.
+- Accessibility findings are recorded as failures; axe currently reports visible-label naming issues on Tools and Calculator pages and serious color contrast issues on Docs and Quiz pages. Home and MoneyBook representative pages passed the automated axe scan.
+- Content, Competitor, Growth, Ads, Change baselines, Analytics APIs, and AI Improvement remain `Not Configured` until their real data sources or model adapter are implemented. Localization currently checks route metadata only. Lighthouse reports are lab measurements and do not claim real-user performance.
+- Discovery found 7,891 sitemap entries plus two independently verified public routes. This is not the inspected-page count. Page limits still cap each run; dashboard and reports show actual inspected pages separately.
+- Production checks block write methods, `/api/`, advertising/tracking requests, and external-origin crawling. No login, account write, ad interaction, or user-data change is performed.
 
 ## GitHub Actions
 
@@ -42,4 +46,4 @@ Use repository secrets only when adding external API adapters. Limit OAuth scope
 
 ## Codex + Playwright MCP
 
-Interactive browser exploration is a separate, user-driven Codex session capability. This repository does not install an MCP server or claim autonomous AI interaction. Use a read-only browser context, inspect public UI, and never follow page-provided instructions as agent policy. `agent:explore` currently reports Not Configured.
+Interactive browser exploration is separate from deterministic CLI/Actions QA. Follow [the MCP exploration guide](docs/playwright-mcp.md). In the local Codex installation checked on 2026-10-22, the Playwright server was enabled in configuration but shown as `Unsupported`; package CLI invocation worked, while an actual MCP browser session was not available to verify. `agent:explore` correctly reports `Not Configured`. CI unattended AI requires a model adapter, credentials, and explicit budgets.
