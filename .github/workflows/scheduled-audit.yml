@@ -21,6 +21,7 @@ on:
     - cron: "15 21 * * 0" # weekly Sunday 06:15 KST
     - cron: "30 21 1 * *" # monthly 1st 06:30 KST
 permissions:
+  actions: read
   contents: read
 concurrency:
   group: woori-audit-${{ github.ref }}
@@ -36,6 +37,7 @@ jobs:
       GSC_API_ENABLED: "false"
       GA4_API_ENABLED: "false"
       GA4_ZERO_COST_CONFIRMED: "false"
+      GOOGLE_CLOUD_BILLING_DISABLED: "false"
       ADSENSE_API_ENABLED: "false"
       ADSENSE_ZERO_COST_CONFIRMED: "false"
     steps:
@@ -45,16 +47,89 @@ jobs:
       - uses: actions/setup-node@v7
         # Native better-sqlite3 is stable on Node 22; the maintained Actions themselves use Node 24.
         with: { node-version: 22, cache: pnpm }
+      - id: previous
+        name: Find previous completed audit snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'NODE'
+          const repo=process.env.GITHUB_REPOSITORY,branch=process.env.GITHUB_REF_NAME,current=Number(process.env.GITHUB_RUN_ID);
+          const url=`${process.env.GITHUB_API_URL}/repos/${repo}/actions/workflows/scheduled-audit.yml/runs?branch=${encodeURIComponent(branch)}&status=completed&per_page=100`;
+          try {
+            const response=await fetch(url,{headers:{authorization:`Bearer ${process.env.GH_TOKEN}`,accept:'application/vnd.github+json','x-github-api-version':'2022-11-28'}});
+            if(!response.ok)throw new Error(`GitHub API ${response.status}`);
+            const body=await response.json();const run=(body.workflow_runs??[]).filter(x=>Number(x.id)<current&&!['cancelled','skipped'].includes(x.conclusion)).sort((a,b)=>Number(b.id)-Number(a.id))[0];
+            if(run)console.log(`run_id=${run.id}`);else console.log('run_id=');
+          } catch(error) { console.log(`run_id=`); console.log(`Snapshot lookup skipped: ${error}`); }
+          NODE
+      - name: Download previous database snapshot
+        if: steps.previous.outputs.run_id != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: woori-audit-${{ steps.previous.outputs.run_id }}
+          run-id: ${{ steps.previous.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: .audit-previous
+      - name: Restore previous SQLite history
+        run: |
+          if [ -f .audit-previous/data/woori-agent.sqlite ]; then
+            mkdir -p data
+            cp .audit-previous/data/woori-agent.sqlite data/woori-agent.sqlite
+            echo "Restored previous issue and coverage history."
+          else
+            echo "No prior SQLite snapshot was available; this run will record a fresh history."
+          fi
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck && pnpm lint && pnpm test && pnpm build
       - run: pnpm exec playwright install --with-deps chromium
-      - run: pnpm agent audit --profile=${{ github.event_name == 'schedule' && github.event.schedule == '0 21 * * *' && 'daily' || github.event_name == 'schedule' && github.event.schedule == '15 21 * * 0' && 'weekly' || github.event_name == 'schedule' && 'monthly' || inputs.profile || 'daily' }} --service=${{ inputs.service || 'all' }} --max-pages=${{ github.event_name == 'schedule' && github.event.schedule == '0 21 * * *' && '6' || github.event_name == 'schedule' && github.event.schedule == '15 21 * * 0' && '24' || github.event_name == 'schedule' && '200' || '6' }}
+      - id: audit
+        name: Run capped read-only audit
+        continue-on-error: true
+        timeout-minutes: 15
+        run: pnpm agent audit --profile=${{ github.event_name == 'schedule' && github.event.schedule == '0 21 * * *' && 'daily' || github.event_name == 'schedule' && github.event.schedule == '15 21 * * 0' && 'weekly' || github.event_name == 'schedule' && 'monthly' || inputs.profile || 'daily' }} --service=${{ inputs.service || 'all' }} --max-pages=${{ github.event_name == 'schedule' && github.event.schedule == '0 21 * * *' && '6' || github.event_name == 'schedule' && github.event.schedule == '15 21 * * 0' && '24' || github.event_name == 'schedule' && '200' || '6' }}
         env:
           REQUEST_DELAY_MS: 1000
           AGENT_MAX_RUN_MS: 900000
+      - name: Classify audit result
+        if: always()
+        env:
+          AUDIT_OUTCOME: ${{ steps.audit.outcome }}
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs"; import path from "node:path";
+            const walk=d=>fs.existsSync(d)?fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(path.join(d,e.name)):[path.join(d,e.name)]):[];
+            const files=walk("reports").filter(f=>f.endsWith("summary.json")).sort((a,b)=>fs.statSync(b).mtimeMs-fs.statSync(a).mtimeMs);
+            if(process.env.AUDIT_OUTCOME!=="success"){
+              if(!files.length){console.error("Infrastructure Failure: audit command failed before a report was generated.");process.exit(1)}
+              const report=JSON.parse(fs.readFileSync(files[0],"utf8"));
+              const actual=(report.features??[]).filter(x=>x.status==="Failed").length+(report.checks??[]).filter(x=>x.status!==null&&x.status>=400).length;
+              const environment=(report.features??[]).filter(x=>x.status==="Environment Failure").length+(report.checks??[]).filter(x=>x.status===null).length;
+              if(actual){console.error(`QA Failure: ${actual} failed feature or HTTP result(s); see report artifact.`);process.exit(1)}
+              if(environment){console.error(`Infrastructure Failure: ${environment} test environment or network result(s); see report artifact and logs.`);process.exit(1)}
+              console.error("Infrastructure Failure: audit exited unsuccessfully without confirmed QA failures; see report artifact and logs.");process.exit(1)
+            }
+          '
+      - name: Keep only this run report in artifact
+        if: always()
+        continue-on-error: true
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs'; import path from 'node:path';
+          const walk=d=>fs.existsSync(d)?fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(path.join(d,e.name)):[path.join(d,e.name)]):[];
+          const reports=walk('reports').filter(f=>f.endsWith('summary.json')).sort((a,b)=>fs.statSync(b).mtimeMs-fs.statSync(a).mtimeMs);
+          if(reports.length){const keep=path.dirname(reports[0]);for(const entry of fs.readdirSync('reports')){const target=path.resolve('reports',entry);if(!keep.startsWith(target+path.sep)&&keep!==target)fs.rmSync(target,{recursive:true,force:true});}}
+          NODE
+      - name: Checkpoint SQLite before upload
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ -f data/woori-agent.sqlite ]; then node --input-type=module -e 'import Database from "better-sqlite3"; const db=new Database("data/woori-agent.sqlite"); db.pragma("wal_checkpoint(TRUNCATE)"); db.close()'; fi
       - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: woori-audit-${{ github.run_id }}
-          path: reports/
+          path: |
+            reports/
+            data/woori-agent.sqlite
           retention-days: 14

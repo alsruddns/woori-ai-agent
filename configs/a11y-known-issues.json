@@ -5,7 +5,8 @@
       "service": "tools",
       "ruleId": "label-content-name-mismatch",
       "selectors": [
-        "a[aria-label=\"woori.today 홈으로 이동\"]"
+        "a[aria-label=\"woori.today 홈으로 이동\"]",
+        "a[aria-label=\"woori.today ホームへ移動\"]"
       ],
       "reason": "Existing visible text is not included in the link's aria-label.",
       "reviewBy": "2026-11-21"

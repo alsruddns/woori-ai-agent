@@ -5,7 +5,7 @@
   "description": "Local and GitHub Actions website intelligence for woori.today",
   "packageManager": "pnpm@9.12.1",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "agent": "tsx apps/cli/src/index.ts",

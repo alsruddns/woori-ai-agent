@@ -36,8 +36,9 @@ export async function googleReport(kind:Kind,runId:string,fetcher:typeof fetch=f
  const save=(status:string,source:string,payload:unknown)=>saveAgentData(runId,agent,status,source,payload);
  const notConfigured=(reason:string)=>{const payload={reason,metrics:null,requestsMade:0};save('Not Configured',`${kind} configuration`,payload);return{status:'Not Configured',payload}};
  if(env[enabledEnv[kind]]!=='true')return notConfigured('Explicit API opt-in is disabled; no provider request was made.');
- if(kind==='ga4'&&env.GA4_ZERO_COST_CONFIRMED!=='true')return notConfigured('GA4 API is fail-closed until the user confirms billing is disabled and only quota-limited free API use is intended. No provider request was made.');
- if(kind==='adsense'&&env.ADSENSE_ZERO_COST_CONFIRMED!=='true')return notConfigured('AdSense API is fail-closed until the user confirms the Google Cloud project has no billable services enabled. No provider request was made.');
+ if((kind==='ga4'||kind==='adsense')&&env.GOOGLE_CLOUD_BILLING_DISABLED!=='true')return notConfigured('Google Cloud billing must remain disabled and be explicitly confirmed before this provider can run. No billing changes are made by this application.');
+ if(kind==='ga4'&&env.GA4_ZERO_COST_CONFIRMED!=='true')return notConfigured('GA4 API is fail-closed until the user opts in to quota-limited read-only requests. No provider request was made.');
+ if(kind==='adsense'&&env.ADSENSE_ZERO_COST_CONFIRMED!=='true')return notConfigured('AdSense API is fail-closed until the user confirms the API project has no billable services enabled. No provider request was made.');
  const hasEnvCredentials=Boolean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL&&env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY),hasEncryptedCredentials=Boolean(env.GOOGLE_CREDENTIALS_DPAPI_FILE&&process.platform==='win32'&&fs.existsSync(env.GOOGLE_CREDENTIALS_DPAPI_FILE)),oauthFile=env.GOOGLE_LOCAL_OAUTH_FILE??'data/google-oauth.dpapi',hasLocalOAuth=process.platform==='win32'&&fs.existsSync(oauthFile);
  if(!id||(!hasEnvCredentials&&!hasEncryptedCredentials&&!hasLocalOAuth))return notConfigured('Google OAuth credentials and provider property/account identifier are required.');
 

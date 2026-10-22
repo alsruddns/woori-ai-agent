@@ -33,15 +33,16 @@ async function main(){
  const sitemapHistory=new Map((discovery.db.prepare('SELECT url,sitemap_lastmod AS lastmod FROM discovered_urls WHERE sitemap_lastmod IS NOT NULL').all() as Array<{url:string;lastmod:string}>).map(x=>[x.url,x.lastmod]));
  const changed=(url:string)=>{const lastmod=sitemapHistory.get(url),checked=inspectedHistory.get(url);if(!lastmod)return false;if(!checked)return true;return lastmod.length===10?lastmod>checked.slice(0,10):Date.parse(lastmod)>Date.parse(checked);};
  const oldestFirst=(a:string,b:string)=>Number(changed(b))-Number(changed(a))||(inspectedHistory.get(a)??'').localeCompare(inspectedHistory.get(b)??'')||a.localeCompare(b);
- if(profile==='monthly')candidates=candidates.sort(oldestFirst).slice(0,limit);
+ if(profile==='monthly')candidates=candidates.sort(oldestFirst);
  else if(profile==='changed'){
    const cutoff=new Date(Date.now()-24*60*60*1000).toISOString();
    const recent=new Set((discovery.db.prepare('SELECT url FROM checks GROUP BY url HAVING MAX(checked_at)>=?').all(cutoff) as Array<{url:string}>).map(x=>x.url));
-   candidates=candidates.filter(u=>!recent.has(u)||changed(u)).sort(oldestFirst).slice(0,limit);
+   candidates=candidates.filter(u=>!recent.has(u)||changed(u)).sort(oldestFirst);
  }else candidates=discovery.selected.filter(u=>allowedService==='all'||serviceFor(u).id===allowedService).slice(0,limit);
  discovery.db.close();
  let chosen=candidates;
  if(profile==='daily'||profile==='weekly')chosen=planQaUrls(allowedService,discovery.availableUrls,limit);
+ else if(profile==='monthly'||profile==='changed')chosen=planQaUrls(allowedService,candidates,limit);
  console.log(`Discovered ${discovery.sitemapTotal} sitemap URLs + ${discovery.supplementalTotal} verified route URL(s); selected ${chosen.length} URL(s) (limit ${limit}).`);
  if(command==='discover'){console.log(`Stored discovered URLs in data/woori-agent.sqlite`);return;}
  const profileAgents=profile==='weekly'?['qa','seo','content','change','ux']:profile==='monthly'?['seo','content','change']:profile==='changed'?['qa','seo','content','change']:['qa','seo','localization'];
@@ -60,7 +61,7 @@ async function main(){
    else statuses[agent]='Not Configured';
  }
  const resultsDb=(await import('./core.js')).initDb();const notCovered=(resultsDb.prepare("SELECT COUNT(*) n FROM feature_results WHERE run_id=? AND status='Not Covered'").get(runId) as {n:number}).n;const failedFeatures=(resultsDb.prepare("SELECT COUNT(*) n FROM feature_results WHERE run_id=? AND status='Failed'").get(runId) as {n:number}).n;const featureResults=resultsDb.prepare('SELECT status,COUNT(*) count FROM feature_results WHERE run_id=? GROUP BY status').all(runId);const inspected=(resultsDb.prepare('SELECT COUNT(DISTINCT url) n FROM checks WHERE run_id=?').get(runId) as {n:number}).n;const pageFailures=checks.filter(c=>c.status===null||c.status>=400).length;const highFindings=findings.filter(f=>f.severity==='Critical'||f.severity==='High').length;const failed=pageFailures+Math.max(failedFeatures,highFindings);const status=aggregateRunStatus(Boolean(failed),statuses);resultsDb.close();recordIssueLifecycle(runId,findings,checks.map(c=>c.url),[...targetAgents]);finishRun(runId,status,inspected,failed,notCovered);const dir=writeReports(runId,command,checks,findings); console.log(JSON.stringify({runId,status,statuses,checked:inspected,featureResults,findings:findings.length,report:dir},null,2));
- if(Object.values(statuses).includes('Failed'))process.exitCode=1;
+ if(failed||Object.values(statuses).includes('Failed'))process.exitCode=1;
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});
 

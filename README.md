@@ -4,6 +4,8 @@ Read-only website intelligence for the six public woori.today services. Runs loc
 
 ## Quick start (PowerShell)
 
+Use Node.js 22 LTS (`.nvmrc`) and pnpm 9.
+
 ```powershell
 corepack enable
 pnpm install
@@ -40,7 +42,7 @@ The production root redirects to `/ko`. Its server-rendered navigation links to 
 
 ## GitHub Actions
 
-The workflow runs a small daily audit at 06:00 KST (UTC 21:00), uploads artifacts for 30 days, and supports manual dispatch. GitHub scheduled jobs can start late. Current cross-repository deployment workflows cannot be observed from this repository; connect a `repository_dispatch` or `workflow_run` only after granting a narrowly scoped GitHub App/token permission in the service repositories. No deployment signal is currently claimed.
+The workflow runs a small daily audit at 06:00 KST (UTC 21:00), uses Node 22 for the native SQLite app, and uses maintained Node 24 compatible Actions. It downloads the prior run's SQLite snapshot when available, then uploads only the current report and database for 14 days. QA findings and infrastructure failures remain separate and both fail the workflow. GitHub scheduled jobs can start late. Current cross-repository deployment workflows cannot be observed from this repository; connect a `repository_dispatch` or `workflow_run` only after granting a narrowly scoped GitHub App/token permission in the service repositories. No deployment signal is currently claimed.
 
 Use repository secrets only when adding external API adapters. Limit OAuth scopes and API quotas. GitHub-hosted runner data is ephemeral; uploaded report artifacts are the configured retention mechanism. Local database and reports are ignored by Git.
 
@@ -50,7 +52,7 @@ Use repository secrets only when adding external API adapters. Limit OAuth scope
 
 ## Phase 3 free analysis
 
-Content, Growth, Improvement, and advertising-layout inspection run with local rules against a page-limited set of public pages. Competitor collection is disabled until `configs/competitors.json` contains domains with a recent terms review; robots.txt is checked before page requests and collection is capped at three pages per domain. GSC, GA4, and AdSense return `Not Configured` without readonly Google service-account configuration. Setup, quotas, scope, and interpretation limits are documented in [docs/FREE_ANALYSIS.md](docs/FREE_ANALYSIS.md). The dashboard reads the latest run's saved `agent_data`; it shows an empty state when a run has no such data.
+Content, Growth, Improvement, and advertising-layout inspection run with local rules against a page-limited set of public pages. Competitor collection is disabled until terms are reviewed and explicit crawl opt-in is recorded; robots.txt is checked before page requests and collection is capped at three pages per domain. GSC, GA4, and AdSense return `Not Configured` until local read-only consent and provider configuration are supplied. GA4 and AdSense also require explicit confirmation that Cloud billing remains disabled; the app never creates projects or enables billing. Pricing and fail-closed rules are documented in [docs/google-free-api-policy.md](docs/google-free-api-policy.md) and [docs/google-free-apis.md](docs/google-free-apis.md).
 
 ## Codex + Playwright MCP
 

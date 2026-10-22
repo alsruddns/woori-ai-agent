@@ -45,13 +45,15 @@ export function initDb() {
     CREATE TABLE IF NOT EXISTS api_cache(cache_key TEXT PRIMARY KEY,provider TEXT NOT NULL,resource_id TEXT NOT NULL,start_date TEXT NOT NULL,end_date TEXT NOT NULL,expires_at TEXT NOT NULL,updated_at TEXT NOT NULL,payload TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS api_usage(provider TEXT NOT NULL,usage_date TEXT NOT NULL,requests INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(provider,usage_date));
     CREATE TABLE IF NOT EXISTS analytics_daily(provider TEXT NOT NULL,metric_date TEXT NOT NULL,service TEXT NOT NULL,dimension_key TEXT NOT NULL,metrics TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(provider,metric_date,service,dimension_key));
-    CREATE TABLE IF NOT EXISTS issue_registry(fingerprint TEXT PRIMARY KEY,service TEXT NOT NULL,url TEXT NOT NULL,agent TEXT NOT NULL,severity TEXT NOT NULL,title TEXT NOT NULL,state TEXT NOT NULL,first_seen TEXT NOT NULL,last_seen TEXT NOT NULL,resolved_at TEXT,occurrences INTEGER NOT NULL DEFAULT 1,evidence TEXT);
+    CREATE TABLE IF NOT EXISTS issue_registry(fingerprint TEXT PRIMARY KEY,service TEXT NOT NULL,url TEXT NOT NULL,locale TEXT NOT NULL DEFAULT 'unknown',agent TEXT NOT NULL,severity TEXT NOT NULL,title TEXT NOT NULL,state TEXT NOT NULL,confidence TEXT NOT NULL DEFAULT 'Confirmed',first_seen TEXT NOT NULL,last_seen TEXT NOT NULL,resolved_at TEXT,occurrences INTEGER NOT NULL DEFAULT 1,evidence TEXT);
     CREATE TABLE IF NOT EXISTS issue_events(id INTEGER PRIMARY KEY,fingerprint TEXT NOT NULL,run_id TEXT NOT NULL,event TEXT NOT NULL,occurred_at TEXT NOT NULL,detail TEXT);
     CREATE INDEX IF NOT EXISTS idx_issue_registry_service_state ON issue_registry(service,state,last_seen);
     CREATE INDEX IF NOT EXISTS idx_analytics_daily_scope ON analytics_daily(provider,metric_date,service);`);
   try { db.exec('ALTER TABLE checks ADD COLUMN html_lang TEXT'); } catch { /* existing DB already migrated */ }
   try { db.exec("ALTER TABLE discovered_urls ADD COLUMN source TEXT NOT NULL DEFAULT 'sitemap'"); } catch { /* existing DB already migrated */ }
   try { db.exec('ALTER TABLE discovered_urls ADD COLUMN sitemap_lastmod TEXT'); } catch { /* existing DB already migrated */ }
+  for(const [column,definition] of [['locale',"TEXT NOT NULL DEFAULT 'unknown'"],['confidence',"TEXT NOT NULL DEFAULT 'Confirmed'"]] as const) try { db.exec(`ALTER TABLE issue_registry ADD COLUMN ${column} ${definition}`); } catch { /* existing DB already migrated */ }
+  db.exec("UPDATE issue_registry SET locale=COALESCE((SELECT locale FROM discovered_urls WHERE discovered_urls.url=issue_registry.url),'unknown') WHERE locale='unknown'");
   for(const [column,definition] of [['finished_at','TEXT'],['discovered_count','INTEGER NOT NULL DEFAULT 0'],['inspected_count','INTEGER NOT NULL DEFAULT 0'],['failed_count','INTEGER NOT NULL DEFAULT 0'],['not_covered_count','INTEGER NOT NULL DEFAULT 0']] as const) try { db.exec(`ALTER TABLE runs ADD COLUMN ${column} ${definition}`); } catch { /* schema already migrated */ }
   return db;
 }

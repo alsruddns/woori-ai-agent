@@ -13,22 +13,22 @@ export function applyCalculatorKnownIssues(features:FeatureResult[],findings:Fin
 export function recordIssueLifecycle(runId:string,findings:Finding[],checkedUrls:string[],agents:string[]){
  const db=initDb(),now=new Date().toISOString(),current=new Set<string>();
  const find=db.prepare('SELECT state,occurrences FROM issue_registry WHERE fingerprint=?');
- const put=db.prepare(`INSERT INTO issue_registry(fingerprint,service,url,agent,severity,title,state,first_seen,last_seen,resolved_at,occurrences,evidence)
- VALUES(@fingerprint,@service,@url,@agent,@severity,@title,@state,@first_seen,@last_seen,@resolved_at,@occurrences,@evidence)
- ON CONFLICT(fingerprint) DO UPDATE SET severity=excluded.severity,title=excluded.title,state=excluded.state,last_seen=excluded.last_seen,resolved_at=NULL,occurrences=excluded.occurrences,evidence=excluded.evidence`);
+ const put=db.prepare(`INSERT INTO issue_registry(fingerprint,service,url,locale,agent,severity,title,state,confidence,first_seen,last_seen,resolved_at,occurrences,evidence)
+ VALUES(@fingerprint,@service,@url,@locale,@agent,@severity,@title,@state,@confidence,@first_seen,@last_seen,@resolved_at,@occurrences,@evidence)
+ ON CONFLICT(fingerprint) DO UPDATE SET url=excluded.url,locale=excluded.locale,severity=excluded.severity,title=excluded.title,state=excluded.state,confidence=excluded.confidence,last_seen=excluded.last_seen,resolved_at=NULL,occurrences=excluded.occurrences,evidence=excluded.evidence`);
  const event=db.prepare('INSERT INTO issue_events(fingerprint,run_id,event,occurred_at,detail) VALUES(?,?,?,?,?)');
  const transaction=db.transaction(()=>{
-  for(const item of findings.filter(x=>x.status==='confirmed'||x.status.startsWith('Known Issue'))){
+  for(const item of findings.filter(x=>x.status==='confirmed'||x.status==='suspected'||x.status.startsWith('Known Issue'))){
    let detailKey='';if(item.title.startsWith('Accessibility: ')&&item.evidence){try{const parsed=JSON.parse(item.evidence) as {selectors?:string[]};detailKey=(parsed.selectors??[]).slice().sort().join('|');}catch{detailKey=item.evidence}}
-   const fingerprint=createHash('sha256').update([item.service,item.url,item.agent,item.title.trim().toLowerCase(),detailKey].join('|')).digest('hex');current.add(fingerprint);
+   const fingerprint=createHash('sha256').update([item.service,item.locale??'unknown',item.agent,item.title.trim().toLowerCase(),detailKey].join('|')).digest('hex');if(current.has(fingerprint))continue;current.add(fingerprint);
    const previous=find.get(fingerprint) as {state:string;occurrences:number}|undefined;
-   const known=item.status.startsWith('Known Issue');const state=known?'Known Issue':!previous?'New':previous.state==='Resolved'?'Recurred':'Existing';
-   put.run({fingerprint,service:item.service,url:item.url,agent:item.agent,severity:item.severity,title:item.title,state,first_seen:now,last_seen:now,resolved_at:null,occurrences:(previous?.occurrences??0)+1,evidence:item.evidence??item.description});
-   if(!previous||state!=='Existing')event.run(fingerprint,runId,state,now,JSON.stringify({severity:item.severity,status:item.status}));
+   const known=item.status.startsWith('Known Issue'),confidence=item.status==='suspected'?'Suspected':'Confirmed';const state=previous?.state==='Resolved'?'Recurred':known?'Known Issue':confidence==='Suspected'?'Suspected':!previous?'New':'Existing';
+   put.run({fingerprint,service:item.service,url:item.url,locale:item.locale??'unknown',agent:item.agent,severity:item.severity,title:item.title,state,confidence,first_seen:now,last_seen:now,resolved_at:null,occurrences:(previous?.occurrences??0)+1,evidence:item.evidence??item.description});
+   if(!previous||state!=='Existing')event.run(fingerprint,runId,state,now,JSON.stringify({severity:item.severity,status:item.status,locale:item.locale??'unknown'}));
   }
   if(checkedUrls.length&&agents.length){
    const checked=new Set(checkedUrls);
-   const open=db.prepare("SELECT fingerprint,url,agent,state FROM issue_registry WHERE state NOT IN ('Resolved','Known Issue')").all() as Array<{fingerprint:string;url:string;agent:string;state:string}>;
+   const open=db.prepare("SELECT fingerprint,url,agent,state FROM issue_registry WHERE state<>'Resolved'").all() as Array<{fingerprint:string;url:string;agent:string;state:string}>;
    for(const item of open)if(checked.has(item.url)&&agents.includes(item.agent)&&!current.has(item.fingerprint)){
     db.prepare("UPDATE issue_registry SET state='Resolved',resolved_at=?,last_seen=? WHERE fingerprint=?").run(now,now,item.fingerprint);
     event.run(item.fingerprint,runId,'Resolved',now,'Issue not reproduced on a checked URL by the same agent.');
