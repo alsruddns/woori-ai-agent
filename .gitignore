@@ -4,6 +4,8 @@ dist/
 data/*.sqlite*
 data/*.dpapi
 data/*credentials*.json
+data/development-executions/**
+data/development-worktrees/**
 reports/**
 !reports/.gitkeep
 playwright-report/
