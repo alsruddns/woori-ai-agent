@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {classifyGscPage,discoverGscProperties,gscReport,isWooriGscProperty,resolveGscRange,selectGscProperty,summarizeGscRows} from '../apps/cli/src/google-analytics.js';
+import {classifyGscPage,collectGscPages,discoverGscProperties,gscReport,isWooriGscProperty,resolveGscRange,selectGscProperty,summarizeGscRows} from '../apps/cli/src/google-analytics.js';
 import {apiRequestsUsed,initDb,reserveApiRequest} from '../apps/cli/src/core.js';
 
 const before={...process.env};
@@ -25,6 +25,14 @@ describe('Search Console read-only data helpers',()=>{
  });
  it('calculates CTR from totals and position weighted by impressions',()=>{
   expect(summarizeGscRows([{clicks:10,impressions:100,ctr:0.1,position:2},{clicks:20,impressions:100,ctr:0.2,position:4}])).toEqual({clicks:30,impressions:200,ctr:0.15,position:3});
+ });
+ it('paginates with startRow offsets and detects an exact final-page boundary',async()=>{
+  const offsets:number[]=[];const result=await collectGscPages(async(startRow,rowLimit)=>{offsets.push(startRow);return startRow===0?Array.from({length:rowLimit},(_,i)=>i):[];},()=>true,2);
+  expect(offsets).toEqual([0,2]);expect(result.rows).toEqual([0,1]);expect(result.requests).toBe(2);expect(result.partial).toBe(false);
+ });
+ it('stops at the request budget and marks returned detail rows partial',async()=>{
+  const offsets:number[]=[];let remaining=1;const result=await collectGscPages(async(startRow,rowLimit)=>{offsets.push(startRow);return Array.from({length:rowLimit},(_,i)=>startRow+i);},()=>remaining-->0,2);
+  expect(offsets).toEqual([0]);expect(result.rows).toEqual([0,1]);expect(result.requests).toBe(1);expect(result.partial).toBe(true);
  });
  it('resolves recent, previous, and custom periods without overlapping comparisons',()=>{
   expect(resolveGscRange('7d','2026-10-22')).toMatchObject({start:'2026-10-16',end:'2026-10-22',previousStart:'2026-10-09',previousEnd:'2026-10-15'});
@@ -60,12 +68,13 @@ describe('Search Console read-only data helpers',()=>{
    const body=JSON.parse(String(init?.body)) as {dimensions:string[];startDate:string};const dimension=body.dimensions.join(',');queryNumber++;
    const row=(keys:string[],clicks:number,impressions:number,position:number)=>({keys,clicks,impressions,ctr:impressions?clicks/impressions:0,position});
    const previous=queryNumber>6;
-   const rows=dimension==='date'?[row(['2026-10-10'],previous?4:10,100,previous?5:3),row(['2026-10-11'],previous?6:20,100,previous?4:2)]:dimension==='query'?[row(['compound interest calculator'],12,100,3)]:dimension==='page'?[row(['https://www.woori.today/ko/calculators/compound-interest'],previous?9:25,300,previous?5:3)]:dimension==='country'?[row(['KOR'],12,100,3)]:dimension==='device'?[row(['MOBILE'],12,100,3)]:[row(['https://www.woori.today/ko/calculators/compound-interest','compound interest calculator'],12,100,3)];
+   const rows=dimension==='date'?[row(['2026-10-10'],previous?4:10,100,previous?5:3),row(['2026-10-11'],previous?6:20,100,previous?4:2)]:dimension==='query'?[row(['compound interest calculator'],1,100,3)]:dimension==='page'?[row(['https://www.woori.today/ko/calculators/compound-interest'],previous?9:25,300,previous?5:3)]:dimension==='country'?[row(['KOR'],12,100,3)]:dimension==='device'?[row(['MOBILE'],12,100,3)]:[row(['https://www.woori.today/ko/calculators/compound-interest','compound interest calculator'],12,100,3)];
    return new Response(JSON.stringify({rows}),{status:200,headers:{'content-type':'application/json'}});
   };
   try{
    const listed=await discoverGscProperties(runId,fetcher);expect(listed.status).toBe('Completed');expect((listed.payload as any).properties.map((entry:any)=>entry.wooriRelated)).toEqual([true,true,false]);selectGscProperty('sc-domain:woori.today');
-   const result=await gscReport(runId,fetcher);expect(result.status).toBe('Completed');const payload=result.payload as any;expect(payload.requestCount).toBe(8);expect(payload.totals.clicks).toBe(30);expect(payload.services).toHaveLength(1);expect(payload.services[0].service).toBe('calculator');expect(payload.services[0].clicks).toBe(25);
+   const result=await gscReport(runId,fetcher);expect(result.status).toBe('Completed');const payload=result.payload as any;expect(payload.requestCount).toBe(8);expect(payload.totals.clicks).toBe(30);expect(payload.totals.impressions).toBe(200);expect(payload.totalSource).toContain('date dimension');expect(payload.detailTotals.clicks).toBe(25);expect(payload.detailToTotalDifference.clicks).toBe(5);expect(payload.services).toHaveLength(1);expect(payload.services[0].service).toBe('calculator');expect(payload.services[0].clicks).toBe(25);expect(payload.opportunities.some((item:any)=>item.type==='high-impressions-low-ctr-query')).toBe(true);
+   const callsAfterCollection=queryNumber;const cached=await gscReport(runId,fetcher);expect(cached.status).toBe('Completed');expect((cached as any).cached).toBe(true);expect(queryNumber).toBe(callsAfterCollection);
    const checkDb=initDb();expect((checkDb.prepare('SELECT COUNT(*) n FROM gsc_report_sets WHERE id=?').get(`${runId}:gsc:28d`) as {n:number}).n).toBe(1);expect((checkDb.prepare("SELECT COUNT(*) n FROM gsc_report_rows WHERE report_id=? AND period_key='current' AND dimension='page'").get(`${runId}:gsc:28d`) as {n:number}).n).toBe(1);expect((checkDb.prepare("SELECT COUNT(*) n FROM analytics_daily WHERE provider='gsc' AND metric_date IN ('2026-10-10','2026-10-11')").get() as {n:number}).n).toBe(2);expect((checkDb.prepare("SELECT COUNT(*) n FROM api_cache WHERE provider='gsc' AND cache_key LIKE 'gsc:searchanalytics:%'").get() as {n:number}).n).toBe(1);checkDb.close();
    for(const file of ['summary.json','summary.md','summary.html'])expect(fs.existsSync(path.join(temp,'reports','gsc',runId,file))).toBe(true);
   }finally{fs.rmSync(temp,{recursive:true,force:true});}
