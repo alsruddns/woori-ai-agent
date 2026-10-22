@@ -48,6 +48,10 @@ Use repository secrets only when adding external API adapters. Limit OAuth scope
 
 `.env.example` fixes `PAID_AI_API_ENABLED=false`, `AI_API_BUDGET_USD=0`, and `AI_AUTO_EXECUTION=false`. The CLI rejects unsafe overrides, has no paid-model SDKs or provider endpoint calls, and CI sets the same policy explicitly. API keys alone never enable model traffic. Codex use is interactive in the user's existing plan; it is not an API integration.
 
+## Phase 3 free analysis
+
+Content, Growth, Improvement, and advertising-layout inspection run with local rules against a page-limited set of public pages. Competitor collection is disabled until `configs/competitors.json` contains domains with a recent terms review; robots.txt is checked before page requests and collection is capped at three pages per domain. GSC, GA4, and AdSense return `Not Configured` without readonly Google service-account configuration. Setup, quotas, scope, and interpretation limits are documented in [docs/FREE_ANALYSIS.md](docs/FREE_ANALYSIS.md). The dashboard reads the latest run's saved `agent_data`; it shows an empty state when a run has no such data.
+
 ## Codex + Playwright MCP
 
 Interactive browser exploration is separate from deterministic CLI/Actions QA. Follow [the MCP exploration guide](docs/playwright-mcp.md). The local Codex CLI `0.156.1` lists the Playwright server as enabled but `Unsupported`; `npx --yes @playwright/mcp@latest --help` starts successfully, while no MCP browser tool is exposed in this session. Therefore the browser MCP handshake is not verified. `agent:explore` reports `Not Configured`. CI never uses an AI model API.

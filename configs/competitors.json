@@ -1,0 +1,5 @@
+{
+  "maxPagesPerDomain": 3,
+  "requestDelayMs": 1500,
+  "competitors": []
+}

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { initDb, config, type Check, type Finding } from './core.js';
+import { initDb, type Check, type Finding } from './core.js';
+import { buildGrowthCandidates } from './free-analysis.js';
 
 export function reviewContent(runId: string, checks: Check[]): Finding[] {
   const findings: Finding[] = [];
@@ -34,8 +35,10 @@ export function comparePageMetadata(runId: string, checks: Check[]): Finding[] {
 
 export function writeGrowthIdeas(outputDir: string): string {
   fs.mkdirSync(outputDir, { recursive: true });
-  const rows = config.services.map(service => `## ${service.label}\n\n- Idea: Add a focused comparison or guided workflow around an existing public route.\n- Basis: The service has public routes under ${service.basePaths.join(', ')}; this is a rule-generated product hypothesis, not measured search demand.\n- User value: Help visitors move from a single task to a related next step.\n- Effort: Medium; confirm existing feature inventory in the service repository before implementation.\n- Codex prompt: Inspect the read-only public flow and the service repository, then propose one small feature with a user story and a regression test. Do not change production.\n`).join('\n');
+  const candidates=buildGrowthCandidates();
+  const rows = candidates.map(item => `## ${item.service}: ${item.name}\n\n- 중복 여부: ${item.duplicate}\n- 사용자 가치: ${item.userValue}\n- 난이도: ${item.effort}\n- Backend: ${item.backendRequired}\n- 운영 비용: ${item.operatingCost}\n- 다국어: ${item.internationalization}\n- 우선순위: ${item.priority}\n- 근거: 발견 경로 ${item.evidence.discoveredRouteCount}개; 예시 ${item.evidence.sampleRoutes.join(', ')||'없음'}\n- 검색량: 측정하지 않음\n- Codex 검토 프롬프트: ${item.codexPrompt}\n`).join('\n');
   const file = path.join(outputDir, 'FEATURE_IDEAS.md');
-  fs.writeFileSync(file, `# Rule-generated feature hypotheses\n\nNo search volume, traffic, revenue, or user survey data was available. Validate each idea with product evidence before prioritizing.\n\n${rows}`, 'utf8');
+  fs.writeFileSync(file, `# Rule-generated feature hypotheses\n\n검색량, 방문자 수, 수익, 사용자 조사 수치는 수집하지 않았습니다. 제안은 공개 경로에서 만든 가설이며 기능 중복 및 저장소 구조를 검토한 뒤 결정해야 합니다.\n\n${rows}`, 'utf8');
+  fs.writeFileSync(path.join(outputDir,'FEATURE_IDEAS.json'),JSON.stringify({generatedAt:new Date().toISOString(),source:'discovered public routes; no search volume or traffic data',candidates},null,2),'utf8');
   return file;
 }
