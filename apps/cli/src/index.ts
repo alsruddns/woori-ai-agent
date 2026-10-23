@@ -14,6 +14,7 @@ import {applyCalculatorKnownIssues,recordIssueLifecycle} from './issue-tracker.j
 import {runAdSenseApprovalAudit} from './adsense-approval.js';
 import {developmentEnvironment,discoverDevelopmentTasks,dryRunDevelopmentTask,enqueueDevelopmentTask,listDevelopmentTasks,listDevelopmentRepositories,transitionDevelopmentTask,updateDevelopmentSettings,type DevelopmentStatus} from './development-orchestrator.js';
 import {cleanupDevelopmentWorktree,codexReadiness,executeApprovedTask,listDevelopmentExecutions} from './codex-executor.js';
+import {createDraftPullRequest,githubConnectionStatus,listDevelopmentPullRequests,refreshPullRequestChecks} from './github-pr.js';
 
 const args=process.argv.slice(2); const command=args[0]??'help';
 const option=(name:string,fallback:string)=>args.find(a=>a.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
@@ -38,15 +39,19 @@ async function main(){
   const action=args[1]??'status';
   if(action==='status'||action==='doctor'){console.log(JSON.stringify(developmentEnvironment(),null,2));return;}
   if(action==='codex'){const result=codexReadiness();console.log(JSON.stringify(result,null,2));if(!result.executionReady)process.exitCode=2;return;}
+  if(action==='github'){const result=githubConnectionStatus();console.log(JSON.stringify(result,null,2));if(result.status!=='Connected')process.exitCode=2;return;}
   if(action==='repositories'){console.log(JSON.stringify(listDevelopmentRepositories(),null,2));return;}
-  if(action==='settings'){const service=option('service',''),code=option('code','off')==='on',deploy=option('deploy','off')==='on';console.log(JSON.stringify(updateDevelopmentSettings(service,code,deploy),null,2));return;}
+  if(action==='settings'){const service=option('service',''),code=option('code','off')==='on',deploy=option('deploy','off')==='on',pr=option('pr','');console.log(JSON.stringify(updateDevelopmentSettings(service,code,deploy,pr===''?undefined:pr==='on'),null,2));return;}
   if(action==='queue'){const discovered=option('discover','false')==='true'?discoverDevelopmentTasks():null;console.log(JSON.stringify({discovered,...listDevelopmentTasks()},null,2));return;}
   if(action==='add'){const result=enqueueDevelopmentTask({service:option('service',''),title:option('title',''),kind:option('kind','manual-review'),priority:option('priority','Medium') as 'Critical'|'High'|'Medium'|'Low',evidence:option('evidence',''),acceptanceCriteria:option('acceptance',''),sourceAgent:'manual'});console.log(JSON.stringify(result,null,2));return;}
   if(action==='transition'){const taskId=option('task-id',''),next=option('to','Triaged') as DevelopmentStatus;console.log(JSON.stringify(transitionDevelopmentTask(taskId,next),null,2));return;}
   if(action==='executions'){console.log(JSON.stringify(listDevelopmentExecutions(),null,2));return;}
+  if(action==='prs'){console.log(JSON.stringify(listDevelopmentPullRequests(),null,2));return;}
+  if(action==='pr'){const taskId=option('task-id','');if(option('approve-pr','false')!=='true'){console.log(JSON.stringify({taskId,mode:'read-only-preview',approvalRequired:'Repeat with --approve-pr=true only after reviewing the task, verified base branch, local test record and workflow policy. No commit, push, or PR mutation occurs in this mode.'},null,2));return;}const result=createDraftPullRequest({taskId,approved:true});console.log(JSON.stringify(result,null,2));if(!['Created','Existing'].includes(result.status))process.exitCode=2;return;}
+  if(action==='ci'){const result=refreshPullRequestChecks(option('task-id',''));console.log(JSON.stringify(result,null,2));return;}
   if(action==='cleanup'){console.log(JSON.stringify(cleanupDevelopmentWorktree(option('task-id','')),null,2));return;}
   if(action==='run'){const taskId=option('task-id','');if(option('approve','false')!=='true'){const result=dryRunDevelopmentTask(taskId);console.log(JSON.stringify({...result,approvalRequired:'Repeat with --approve=true only after reviewing the task and passing --allow-paths=<glob,...>.'},null,2));if(!result.wouldExecute)process.exitCode=2;return;}const result=await executeApprovedTask({taskId,approved:true,allowedPaths:option('allow-paths',''),timeoutMs:Number(option('timeout-ms','600000'))});console.log(JSON.stringify(result,null,2));if(result.status!=='Completed')process.exitCode=2;return;}
-  throw new Error('Development commands: status | doctor | codex | repositories | queue [--discover=true] | settings --service=<id> --code=on|off --deploy=off | add --service --title --evidence --acceptance | transition --task-id --to | executions | run --task-id [--approve=true --allow-paths=src/**,tests/**] | cleanup --task-id (clean worktree only)');
+  throw new Error('Development commands: status | doctor | codex | github | repositories | queue [--discover=true] | settings --service=<id> --code=on|off --pr=on|off --deploy=off | add --service --title --evidence --acceptance | transition --task-id --to | executions | prs | pr --task-id [--approve-pr=true] | ci --task-id | run --task-id [--approve=true --allow-paths=src/**,tests/**] | cleanup --task-id (clean worktree only)');
  }
  if(command==='help'){console.log(`Woori AI Agent\nCommands: discover | smoke | qa | seo | content | competitor | growth | ux | performance | localization | ads | adsense-approval | development | change | analytics | improvement | all | report | status\nOptions: --service=all|home|calculator|tools|money|docs|quiz --profile=daily|weekly|monthly|changed --max-pages=50`);return;}
  if(command==='explore'){console.error('Not Configured: no autonomous model API is permitted. Use the user-run Codex interactive session with Playwright MCP; no browser actions were attempted.');process.exitCode=2;return;}

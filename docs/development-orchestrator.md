@@ -1,6 +1,6 @@
-# Local development orchestrator (Phase 9B)
+# Local development orchestrator (Phase 9C)
 
-This is a local, one-task-at-a-time workflow. Queue discovery never starts a model. A write run requires a `Ready` task, a clean verified service clone, service code opt-in, an explicit `--approve=true`, and a relative path allowlist. The runner creates a task branch in a temporary Git worktree and pins the Codex Windows sandbox to MXC while ignoring user config. It does not create PRs, merge, deploy, or roll back.
+This is a local, one-task-at-a-time workflow. Queue discovery never starts a model. A write run requires a `Ready` task, a clean verified service clone, service code opt-in, an explicit `--approve=true`, and a relative path allowlist. The runner creates a task branch in a temporary Git worktree and pins the Codex Windows sandbox to MXC while ignoring user config. Draft PR creation is a separate service opt-in plus a second explicit per-task approval. Automatic merge and deployment remain disabled.
 
 ## Commands
 
@@ -13,13 +13,19 @@ pnpm agent development queue --discover=true
 pnpm agent development transition --task-id=dev-<id> --to=Triaged
 pnpm agent development transition --task-id=dev-<id> --to=Ready
 pnpm agent development settings --service=docs --code=on --deploy=off
+pnpm agent development settings --service=docs --code=on --pr=on --deploy=off
 pnpm agent development run --task-id=dev-<id>
 pnpm agent development run --task-id=dev-<id> --approve=true --allow-paths=src/**,tests/** --timeout-ms=600000
 pnpm agent development executions
+pnpm agent development github
+pnpm agent development pr --task-id=dev-<id>
+pnpm agent development pr --task-id=dev-<id> --approve-pr=true
+pnpm agent development ci --task-id=dev-<id>
+pnpm agent development prs
 pnpm agent development cleanup --task-id=dev-<id>
 ```
 
-The first `run` without approval returns a read-only preflight report; it does not call Codex or edit files. The write command is a single, explicit local action; there is no batch worker. Review the task and allowed paths before passing `--approve=true`. Do not enable code opt-in for Calculator during its protected multilingual work. MoneyBook is never eligible. A clean worktree is required; pre-existing edits in the source clone cause an immediate block.
+The first `run` without approval returns a read-only preflight report; it does not call Codex or edit files. The write command is a single, explicit local action; there is no batch worker. Review the task and allowed paths before passing `--approve=true`. Do not enable code or PR opt-in for Calculator during its protected multilingual work. MoneyBook is never eligible. A clean worktree is required; pre-existing edits in the source clone cause an immediate block. Turn on PR opt-in before the local Codex run so its isolated task worktree starts from the configured PR base branch.
 
 ## Codex authentication, cost, and sandbox
 
@@ -39,10 +45,18 @@ Successful Codex output alone is not success. At least one in-scope change and a
 
 ## Repository inventory and protections
 
-The exact remotes, local paths, current branches, dirty-file counts, package scripts and deployment workflow names are in `configs/development-repositories.json`. Runtime status rechecks each repository before every task. Calculator is write-locked. MoneyBook is excluded. Source clones with dirty files (currently Calculator and Tools) remain ineligible until the owner finishes and commits or otherwise clears that work.
+The exact remotes, local paths, current branches, dirty-file counts, package scripts, deployment workflow names, and verified PR base branches are in `configs/development-repositories.json`. Runtime status rechecks each repository before every task. Calculator is write-locked. MoneyBook is excluded. Source clones with dirty files remain ineligible until the owner finishes and commits or otherwise clears that work.
 
-All five eligible clones are Next.js/TypeScript/pnpm projects. Their primary branches are never checked out or overwritten; the executor creates `codex-agent/<service>/<task-id>` from the verified current branch. Worktrees are stored under the orchestrator’s ignored `data/development-worktrees/` directory.
+All five eligible clones are Next.js/TypeScript/pnpm projects. Their primary branches are never checked out or overwritten; with PR opt-in enabled, the executor fetches the configured remote PR base and creates `codex-agent/<service>/<task-id>` in a separate worktree from that base. Worktrees are stored under the orchestrator's ignored `data/development-worktrees/` directory. Before PR creation, the orchestrator rechecks that the remote base SHA has not moved, the validated diff is unchanged, no duplicate PR or branch exists, the workflow triggers cannot deploy the task branch, and the task branch is the only ref pushed.
+
+## GitHub PR and CI behavior
+
+`development github` uses the existing `gh` authentication in its local credential store and prints only login, scopes, repository permission, default branch, and configured base branch. It never stores or logs a token. Permissions are not expanded automatically. PR automation is OFF by default per service and Calculator remains locked. A PR attempt needs `--approve-pr=true`, successful local Codex validation, a clean and verified source clone, the recorded allowlist, secret scanning, and a safe-workflow review. It commits and pushes only the isolated task branch, then asks `gh` to create a Draft PR. It has no merge, deploy, or rollback command path.
+
+The orchestrator checks existing GitHub workflow triggers at the verified PR base. It blocks deployment-capable `pull_request`/`pull_request_target` workflows and push workflows that can match the generated task branch. After a PR exists it reads check rollups and workflow run IDs using `gh`; absent PR checks remain `Not Configured`, never Passed. Existing service workflows were inspected read-only: their deployment triggers target `main` or manual dispatch, and no PR check workflow was present in the inspected configuration. Thus these repositories currently have no configured PR CI result to report. Service repositories were not modified and no live service PR was created in Phase 9C.
+
+The PR creation path is covered with a temporary local Git repository, local bare remote, and mocked GitHub CLI responses. This verifies commit/push isolation, Draft PR command construction, duplicate/idempotent handling, and CI status mapping without writing to GitHub. A real write integration has not been run against any GitHub repository.
 
 ## Deferred
 
-PR creation (Phase 9C), approval/merge/deployment integration (9D), rollback, and automatic queue scheduling remain disabled. GitHub Actions never runs Codex. These require separate review and must not be inferred from a task reaching `Testing`.
+Automatic merge, approval-triggered deployment, rollback, and automatic queue scheduling remain disabled (Phase 9D). GitHub Actions never runs Codex. These require separate implementation and must not be inferred from a task reaching `Testing`, `PR Created`, or `Awaiting Approval`.
