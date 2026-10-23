@@ -2,6 +2,7 @@ import {createSign} from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
+import {createPlatformAdapter,credentialFileStatus} from './platform-adapters.js';
 import {apiRequestsUsed,initDb,readApiCache,reserveApiRequest,saveAgentData,saveAnalyticsDaily,serviceFor,writeApiCache,config} from './core.js';
 
 type Kind='gsc'|'ga4'|'adsense';
@@ -16,8 +17,9 @@ const asDate=(value:string)=>/^\d{8}$/.test(value)?`${value.slice(0,4)}-${value.
 async function getToken(scope:string,fetcher:typeof fetch){
  const cached=tokens.get(scope);if(cached&&cached.expiresAt>Date.now()+60000)return cached.value;
  const localOAuthFile=process.env.GOOGLE_LOCAL_OAUTH_FILE??'data/google-oauth.dpapi';
- if(process.platform==='win32'&&fs.existsSync(localOAuthFile)){
-  try{const {unprotectForCurrentWindowsUser}=await import('./local-dpapi.js');const encrypted=fs.readFileSync(localOAuthFile,'utf8');const stored=JSON.parse(unprotectForCurrentWindowsUser(encrypted)) as {refreshToken:string;scopes:string[]};if(!stored.scopes.includes(scope))throw new Error('requested read-only provider scope is not in the local grant');const clientId=process.env.GOOGLE_OAUTH_CLIENT_ID,clientSecret=process.env.GOOGLE_OAUTH_CLIENT_SECRET;if(!clientId||!clientSecret)throw new Error('OAuth Desktop client id/secret are not configured');const response=await fetcher('https://oauth2.googleapis.com/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:clientId,client_secret:clientSecret,refresh_token:stored.refreshToken,grant_type:'refresh_token'}),signal:AbortSignal.timeout(15000)});if(!response.ok)throw new Error(`Google OAuth refresh returned HTTP ${response.status}`);const value=await response.json() as {access_token:string;expires_in:number};tokens.set(scope,{value:value.access_token,expiresAt:Date.now()+value.expires_in*1000});return value.access_token;}catch(error){throw new Error(`Local OAuth credentials could not be used: ${error instanceof Error?error.message:String(error)}`);}
+ const oauthStatus=credentialFileStatus(localOAuthFile);
+ if(process.platform==='win32'&&oauthStatus.configured){
+  try{const credentialStore=createPlatformAdapter().credentialStore;if(!credentialStore.unprotect)throw new Error('Windows DPAPI credential adapter is unavailable');const encrypted=fs.readFileSync(localOAuthFile,'utf8');const stored=JSON.parse(await credentialStore.unprotect(encrypted)) as {refreshToken:string;scopes:string[]};if(!stored.scopes.includes(scope))throw new Error('requested read-only provider scope is not in the local grant');const clientId=process.env.GOOGLE_OAUTH_CLIENT_ID,clientSecret=process.env.GOOGLE_OAUTH_CLIENT_SECRET;if(!clientId||!clientSecret)throw new Error('OAuth Desktop client id/secret are not configured');const response=await fetcher('https://oauth2.googleapis.com/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:clientId,client_secret:clientSecret,refresh_token:stored.refreshToken,grant_type:'refresh_token'}),signal:AbortSignal.timeout(15000)});if(!response.ok)throw new Error(`Google OAuth refresh returned HTTP ${response.status}`);const value=await response.json() as {access_token:string;expires_in:number};tokens.set(scope,{value:value.access_token,expiresAt:Date.now()+value.expires_in*1000});return value.access_token;}catch(error){throw new Error(`Local OAuth credentials could not be used: ${error instanceof Error?error.message:String(error)}`);}
  }
  let email=process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,key=process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?.replace(/\\n/g,'\n');
  if((!email||!key)&&process.env.GOOGLE_CREDENTIALS_DPAPI_FILE&&process.platform==='win32'){

@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createPlatformAdapter, detectCodexHome } from './platform-adapters.js';
 
 export type CodexLauncher = { kind:'node'|'exe'; executable:string; prefixArgs:string[]; version:string };
 const credentialEnvNames=['OPENAI_API_KEY','CODEX_API_KEY','OPENAI_BASE_URL','OPENAI_API_BASE','CODEX_BASE_URL','ANTHROPIC_API_KEY','GEMINI_API_KEY','GOOGLE_API_KEY'];
@@ -16,13 +17,18 @@ function candidatePaths(){
   for(const root of roots){
    found.push(path.join(root,'.codex','bin','codex.exe'),path.join(root,'.local','bin','codex.exe'),path.join(root,'scoop','apps','codex','current','codex.exe'));
   }
+ }else if(process.platform==='linux'){
+  const which=spawnSync('which',['codex'],{encoding:'utf8',timeout:3000});
+  if(which.status===0)found.push(...which.stdout.split(/\r?\n/).map(value=>value.trim()).filter(Boolean));
+  found.push(path.join(os.homedir(),'.local','bin','codex'),'/usr/local/bin/codex','/usr/bin/codex');
  }
  return [...new Set(found)];
 }
-function launcherFor(file:string):Omit<CodexLauncher,'version'>|null{
+function launcherFor(file:string,platform=process.platform):Omit<CodexLauncher,'version'>|null{
  const ext=path.extname(file).toLowerCase();
  if(ext==='.exe')return{kind:'exe',executable:file,prefixArgs:[]};
  if(ext==='.js')return{kind:'node',executable:process.execPath,prefixArgs:[file]};
+ if(platform==='linux'&&ext==='')return{kind:'exe',executable:file,prefixArgs:[]};
  if(ext==='.cmd'||ext==='.ps1'||ext===''){
   const dir=path.dirname(file);
   const jsCandidates=[path.join(dir,'node_modules','@openai','codex','bin','codex.js'),path.join(dir,'..','node_modules','@openai','codex','bin','codex.js')];
@@ -34,9 +40,10 @@ function runCli(base:Omit<CodexLauncher,'version'>,args:string[],timeout=8000){
  const result=spawnSync(base.executable,[...base.prefixArgs,...args],{encoding:'utf8',windowsHide:true,timeout,env:safeCodexEnv(),maxBuffer:1024*1024});
  return{status:result.status,stdout:result.stdout??'',stderr:result.stderr??'',error:result.error};
 }
-export function safeCodexEnv():NodeJS.ProcessEnv{
+export function safeCodexEnv(source:NodeJS.ProcessEnv=process.env,platform=process.platform):NodeJS.ProcessEnv{
  const env:NodeJS.ProcessEnv={};
- for(const name of winEnvNames)if(process.env[name])env[name]=process.env[name];
+ const allowed=platform==='win32'?winEnvNames:['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TMPDIR','CODEX_HOME','XDG_CONFIG_HOME','TERM'];
+ for(const name of allowed)if(source[name])env[name]=source[name];
  env.CI='true';env.PLAYWRIGHT_WORKERS='1';env.MAX_WORKERS='1';env.COREPACK_ENABLE_NETWORK='0';env.npm_config_offline='true';
  return env;
 }
@@ -99,10 +106,14 @@ export function secretFindings(file:string,text:string){
  return findings;
 }
 export function codexExecArgs(worktree:string,mode:'read-only'|'workspace-write',prompt:string){
- return ['-c','windows.sandbox=mxc','exec','--ignore-user-config','--sandbox',mode,'--ephemeral','--json','--cd',worktree,prompt];
+ const args=createPlatformAdapter().codexExecutor.buildExecArgs(worktree,mode,prompt);
+ if(!args)throw new Error(`Codex execution arguments are not configured for ${process.platform}.`);
+ return args;
 }
 export function codexSandboxArgs(worktree:string,command:string,args:string[]){
- return ['-c','windows.sandbox=mxc','sandbox','--include-managed-config','--permission-profile',':workspace','--cd',worktree,'--',command,...args];
+ const safeArgs=createPlatformAdapter().codexExecutor.buildSandboxCommandArgs(worktree,command,args);
+ if(!safeArgs)throw new Error(`Sandbox command arguments are not configured for ${process.platform}.`);
+ return safeArgs;
 }
 export function redactCodexOutput(input:string){
  return input
@@ -115,4 +126,8 @@ export function isWithinRoot(root:string,target:string){
  return relative!==''&&!relative.startsWith(`..${path.sep}`)&&relative!=='..'&&!path.isAbsolute(relative);
 }
 export function platformIsWindows(){return process.platform==='win32';}
-export function codexAuthFilePresent(){const home=process.env.CODEX_HOME||path.join(os.homedir(),'.codex');return fs.existsSync(path.join(home,'auth.json'));}
+export function codexAuthFilePresent(){const home=detectCodexHome();return fs.existsSync(path.join(home,'auth.json'));}
+export function codexPlatformReadiness(){
+ const adapter=createPlatformAdapter();
+ return{platform:adapter.id,credentialStore:{id:adapter.credentialStore.id,status:adapter.credentialStore.status,reason:adapter.credentialStore.reason},sandbox:{id:adapter.sandbox.id,status:adapter.sandbox.status,reason:adapter.sandbox.reason},executor:{status:adapter.codexExecutor.status,reason:adapter.codexExecutor.reason},worker:adapter.workerHealth.snapshot()};
+}

@@ -43,6 +43,12 @@ describe('Codex local execution safety',()=>{
   expect((listDevelopmentTasks().tasks[0] as {status:string}).status).toBe('Ready');
  });
 
+ it('fails closed for Linux code modification until a Linux sandbox adapter is ready',async()=>{
+  setup();const taskId=makeTask();let invoked=false;
+  const result=await executeApprovedTask({taskId,approved:true,platform:'linux',allowedPaths:'src/**',runCodex:async()=>{invoked=true;return{exitCode:0,timedOut:false,stdout:'',stderr:''};}});
+  expect(result.status).toBe('Blocked');expect(result.error).toMatch(/Windows workstation only/i);expect(invoked).toBe(false);
+ });
+
  it('blocks API-key environments before creating a worktree or invoking Codex',async()=>{
   const root=setup();const taskId=makeTask();let invoked=false;
   const result=await executeApprovedTask({taskId,approved:true,allowedPaths:'src/**',env:{CODEX_API_KEY:'secret-never-log'},repositoryOverride:repository(path.join(root,'source')),runCodex:async()=>{invoked=true;return{exitCode:0,timedOut:false,stdout:'',stderr:''};}});
@@ -57,7 +63,7 @@ describe('Codex local execution safety',()=>{
 
  it('uses a temporary Git worktree and records successful verification without touching the source worktree',async()=>{
   const root=setup();const source=fixtureRepo(root);const taskId=makeTask();const before=execFileSync('git',['-C',source,'status','--porcelain'],{encoding:'utf8'});
-  const cli=fakeCli(root);const result=await executeApprovedTask({taskId,approved:true,allowedPaths:'src/**,tests/**',launcher:cli,repositoryOverride:repository(source),agentDataRoot:path.join(root,'orchestrator'),sandboxProbe:()=>({status:'Ready',message:'fixture sandbox ready',exitCode:0}),runCodex:async(_cli,_args,cwd)=>{fs.writeFileSync(path.join(cwd,'src','generated.ts'),'export const generated = true;\n');return{exitCode:0,timedOut:false,stdout:'done',stderr:''};},runValidation:(_cli,cwd,patterns)=>({passed:patterns.includes('src/**')&&fs.existsSync(path.join(cwd,'src','generated.ts')),changedFiles:['src/generated.ts'],verification:{passed:true,failures:[],scripts:[{script:'lint',exitCode:0,timedOut:false,output:''},{script:'test',exitCode:0,timedOut:false,output:''},{script:'build',exitCode:0,timedOut:false,output:''}]}})});
+  const cli=fakeCli(root);const result=await executeApprovedTask({taskId,approved:true,platform:'win32',allowedPaths:'src/**,tests/**',launcher:cli,repositoryOverride:repository(source),agentDataRoot:path.join(root,'orchestrator'),sandboxProbe:()=>({status:'Ready',message:'fixture sandbox ready',exitCode:0}),runCodex:async(_cli,_args,cwd)=>{fs.writeFileSync(path.join(cwd,'src','generated.ts'),'export const generated = true;\n');return{exitCode:0,timedOut:false,stdout:'done',stderr:''};},runValidation:(_cli,cwd,patterns)=>({passed:patterns.includes('src/**')&&fs.existsSync(path.join(cwd,'src','generated.ts')),changedFiles:['src/generated.ts'],verification:{passed:true,failures:[],scripts:[{script:'lint',exitCode:0,timedOut:false,output:''},{script:'test',exitCode:0,timedOut:false,output:''},{script:'build',exitCode:0,timedOut:false,output:''}]}})});
   expect(result.status).toBe('Completed');expect((result as Record<string,unknown>).changedFiles).toEqual(['src/generated.ts']);expect((result as Record<string,unknown>).branchName).toContain('codex-agent/docs/');
   expect(execFileSync('git',['-C',source,'status','--porcelain'],{encoding:'utf8'})).toBe(before);
   expect((listDevelopmentTasks().tasks[0] as {status:string}).status).toBe('Testing');
@@ -66,19 +72,19 @@ describe('Codex local execution safety',()=>{
 
  it('marks out-of-scope edits and test failures as Failed and never retries',async()=>{
   const root=setup();const source=fixtureRepo(root);const taskId=makeTask();const cli=fakeCli(root);let calls=0;
-  const result=await executeApprovedTask({taskId,approved:true,allowedPaths:'src/**',launcher:cli,repositoryOverride:repository(source),agentDataRoot:path.join(root,'orchestrator'),sandboxProbe:()=>({status:'Ready',message:'fixture sandbox ready',exitCode:0}),runCodex:async(_cli,_args,cwd)=>{calls++;fs.mkdirSync(path.join(cwd,'docs'),{recursive:true});fs.writeFileSync(path.join(cwd,'docs','outside.md'),'outside allowlist');return{exitCode:0,timedOut:false,stdout:'done',stderr:''};},runValidation:()=>({passed:false,changedFiles:['docs/outside.md'],verification:{passed:false,failures:['Changes outside approved path allowlist: docs/outside.md']}})});
+  const result=await executeApprovedTask({taskId,approved:true,platform:'win32',allowedPaths:'src/**',launcher:cli,repositoryOverride:repository(source),agentDataRoot:path.join(root,'orchestrator'),sandboxProbe:()=>({status:'Ready',message:'fixture sandbox ready',exitCode:0}),runCodex:async(_cli,_args,cwd)=>{calls++;fs.mkdirSync(path.join(cwd,'docs'),{recursive:true});fs.writeFileSync(path.join(cwd,'docs','outside.md'),'outside allowlist');return{exitCode:0,timedOut:false,stdout:'done',stderr:''};},runValidation:()=>({passed:false,changedFiles:['docs/outside.md'],verification:{passed:false,failures:['Changes outside approved path allowlist: docs/outside.md']}})});
   expect(result.status).toBe('Failed');expect(calls).toBe(1);expect((listDevelopmentTasks().tasks[0] as {status:string}).status).toBe('Failed');
  });
 
  it('blocks pre-existing user modifications before creating a worktree',async()=>{
   const root=setup();const taskId=makeTask();let invoked=false;
-  const result=await executeApprovedTask({taskId,approved:true,allowedPaths:'src/**',launcher:fakeCli(root),repositoryOverride:repository(path.join(root,'source'),{dirtyFileCount:2,dirtyPaths:['README.md','src/a.ts'],worktreeEligible:false}),agentDataRoot:path.join(root,'orchestrator'),sandboxProbe:()=>({status:'Ready',message:'fixture sandbox ready',exitCode:0}),runCodex:async()=>{invoked=true;return{exitCode:0,timedOut:false,stdout:'',stderr:''};}});
+  const result=await executeApprovedTask({taskId,approved:true,platform:'win32',allowedPaths:'src/**',launcher:fakeCli(root),repositoryOverride:repository(path.join(root,'source'),{dirtyFileCount:2,dirtyPaths:['README.md','src/a.ts'],worktreeEligible:false}),agentDataRoot:path.join(root,'orchestrator'),sandboxProbe:()=>({status:'Ready',message:'fixture sandbox ready',exitCode:0}),runCodex:async()=>{invoked=true;return{exitCode:0,timedOut:false,stdout:'',stderr:''};}});
   expect(result.status).toBe('Blocked');expect(result.error).toMatch(/pre-existing modified file/i);expect(invoked).toBe(false);
  });
 
  it('cleans only the recorded, clean isolated worktree and preserves task history',async()=>{
   const root=setup();const source=fixtureRepo(root);const taskId=makeTask();const cli=fakeCli(root);const dataRoot=path.join(root,'orchestrator');
-  const result=await executeApprovedTask({taskId,approved:true,allowedPaths:'src/**',launcher:cli,repositoryOverride:repository(source),agentDataRoot:dataRoot,sandboxProbe:()=>({status:'Ready',message:'fixture sandbox ready',exitCode:0}),runCodex:async()=>({exitCode:0,timedOut:false,stdout:'no edits',stderr:''}),runValidation:()=>({passed:false,changedFiles:[],verification:{passed:false,failures:['no changed files']}})});
+  const result=await executeApprovedTask({taskId,approved:true,platform:'win32',allowedPaths:'src/**',launcher:cli,repositoryOverride:repository(source),agentDataRoot:dataRoot,sandboxProbe:()=>({status:'Ready',message:'fixture sandbox ready',exitCode:0}),runCodex:async()=>({exitCode:0,timedOut:false,stdout:'no edits',stderr:''}),runValidation:()=>({passed:false,changedFiles:[],verification:{passed:false,failures:['no changed files']}})});
   expect(result.status).toBe('Failed');
   const cleaned=cleanupDevelopmentWorktree(taskId,dataRoot,repository(source));
   expect(cleaned.status).toBe('Cleaned');expect(fs.existsSync(cleaned.worktreePath)).toBe(false);
