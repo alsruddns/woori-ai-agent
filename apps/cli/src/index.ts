@@ -15,6 +15,7 @@ import {runAdSenseApprovalAudit} from './adsense-approval.js';
 import {developmentEnvironment,discoverDevelopmentTasks,dryRunDevelopmentTask,enqueueDevelopmentTask,listDevelopmentTasks,listDevelopmentRepositories,transitionDevelopmentTask,updateDevelopmentSettings,type DevelopmentStatus} from './development-orchestrator.js';
 import {cleanupDevelopmentWorktree,codexReadiness,executeApprovedTask,listDevelopmentExecutions} from './codex-executor.js';
 import {createDraftPullRequest,githubConnectionStatus,listDevelopmentPullRequests,refreshPullRequestChecks} from './github-pr.js';
+import {deploymentReadiness,refreshDeploymentRuns} from './deployment-orchestrator.js';
 
 const args=process.argv.slice(2); const command=args[0]??'help';
 const option=(name:string,fallback:string)=>args.find(a=>a.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
@@ -40,6 +41,7 @@ async function main(){
   if(action==='status'||action==='doctor'){console.log(JSON.stringify(developmentEnvironment(),null,2));return;}
   if(action==='codex'){const result=codexReadiness();console.log(JSON.stringify(result,null,2));if(!result.executionReady)process.exitCode=2;return;}
   if(action==='github'){const result=githubConnectionStatus();console.log(JSON.stringify(result,null,2));if(result.status!=='Connected')process.exitCode=2;return;}
+  if(action==='deployment'){console.log(JSON.stringify(option('refresh','false')==='true'?{...deploymentReadiness(),refresh:refreshDeploymentRuns()}:deploymentReadiness(),null,2));return;}
   if(action==='repositories'){console.log(JSON.stringify(listDevelopmentRepositories(),null,2));return;}
   if(action==='settings'){const service=option('service',''),code=option('code','off')==='on',deploy=option('deploy','off')==='on',pr=option('pr','');console.log(JSON.stringify(updateDevelopmentSettings(service,code,deploy,pr===''?undefined:pr==='on'),null,2));return;}
   if(action==='queue'){const discovered=option('discover','false')==='true'?discoverDevelopmentTasks():null;console.log(JSON.stringify({discovered,...listDevelopmentTasks()},null,2));return;}
