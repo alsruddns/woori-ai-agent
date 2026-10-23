@@ -42,6 +42,7 @@ describe('service CI proposal policy',()=>{
    expect(workflow).toContain('pull_request:');expect(workflow).toContain('branches: [develop]');expect(workflow).toContain('contents: read');
    expect(workflow).not.toMatch(/^\s+(push|workflow_dispatch|pull_request_target):/m);
    expect(workflow).not.toMatch(/appleboy\/ssh-action|docker\/build-push-action|environment:\s*production|SERVER_SSH_KEY|secrets\./i);
+   expect(workflow.indexOf('corepack prepare pnpm@9.12.1')).toBeLessThan(workflow.indexOf('cache: pnpm'));
    expect(patch).toContain('+++ b/.github/workflows/pr-ci.yml');
    for(const command of item.commands.slice(1))expect(workflow).toContain(command);
   }

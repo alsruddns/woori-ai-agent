@@ -2,7 +2,7 @@ diff --git a/.github/workflows/pr-ci.yml b/.github/workflows/pr-ci.yml
 new file mode 100644
 --- /dev/null
 +++ b/.github/workflows/pr-ci.yml
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,44 @@
 +name: PR CI
 +
 +on:
@@ -30,9 +30,13 @@ new file mode 100644
 +        uses: actions/setup-node@v6
 +        with:
 +          node-version: 22
-+          cache: pnpm
 +      - name: Activate locked pnpm version
 +        run: corepack enable && corepack prepare pnpm@9.12.1 --activate
++      - name: Configure pnpm dependency cache
++        uses: actions/setup-node@v6
++        with:
++          node-version: 22
++          cache: pnpm
 +      - name: Install dependencies
 +        run: pnpm install --frozen-lockfile
 +      - name: "Run pnpm test"
