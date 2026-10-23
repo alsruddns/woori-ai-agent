@@ -13,6 +13,7 @@ export function CiReadiness({services,pullRequests=[],selected='all'}:{services:
     <p>기준 브랜치: {item.branch} · required checks: {item.requiredChecksStatus}</p>
     <p>Workflow: {item.workflowName??'Not Configured'} · check context: {item.checkContext??'Not Configured'}</p>
     <p>적용 상태: {item.applyStatus??'Not Configured'}</p>
+    {item.securityUpdate&&<p>보안 패치: {item.securityUpdate.from} → {item.securityUpdate.to} · React {item.securityUpdate.react}</p>}
     <p>임시 PR 검사: {item.smoke?.status??'Not Run'}{item.smoke?.headSha?<> · HEAD <code>{item.smoke.headSha}</code></>:null}{item.smoke?.runId?<> · Run ID <code>{item.smoke.runId}</code></>:null}{item.smoke?.runUrl?<> · <a href={item.smoke.runUrl} target="_blank" rel="noreferrer">Actions 실행 보기</a></>:null}</p>
     <p>배포 트리거 위험: {item.deploymentConflict}</p><p>검증 명령: {(item.commands??[]).join(' · ')}</p>
     <details><summary>기존 워크플로 및 적용안</summary><ul>{(item.workflows??[]).map((workflow:string)=><li key={workflow}>{workflow}</li>)}</ul>
