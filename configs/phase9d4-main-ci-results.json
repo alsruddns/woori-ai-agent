@@ -9,7 +9,7 @@
   },
   "scope": "Temporary workflow-only draft PRs targeting main; none merged",
   "result": "All five validate checks succeeded",
-  "productionDeploymentsTriggered": false,
+  "smokePrsTriggeredProductionDeployments": false,
   "branchProtectionChanged": false,
   "services": [
     {
@@ -90,6 +90,14 @@
     "reason": "No approved read-only production SSH access was configured. GitHub workflow SHA and build digests do not prove which image is running now.",
     "productionAccessAttempted": false,
     "workflowDispatchAttempted": false,
+    "priorIndependentHomeDeploymentDuringReview": {
+      "runId": 39986396038,
+      "event": "push",
+      "sha": "dd92cc85a8df421239327c8238c36c63fc474ea0",
+      "workflowConclusion": "success",
+      "deployStepConclusion": "success",
+      "runtimeContainerObserved": false
+    },
       "latestHomeDeploymentObservedDuringReview": {
       "runId": 39989900060,
       "event": "push",

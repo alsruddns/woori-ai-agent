@@ -6,13 +6,15 @@
 
 - 5개 서비스의 PR CI를 `develop`과 `main` 대상으로 확장하고, 각 서비스의 `develop`에 workflow 변경만 커밋했다.
 - 각 서비스에 workflow 파일만 포함한 임시 Draft PR을 `main` 대상으로 열어 실제 `validate` 실행을 확인했다. 모두 성공했으며 전부 병합 없이 닫고 임시 브랜치를 삭제했다.
-- PR 이벤트로 실행된 것은 `PR CI`뿐이었다. 테스트 브랜치 실행 목록에는 `publish.yml` 또는 `deploy.yml` 실행이 없었다. 운영 배포, 병합, 롤백은 수행하지 않았다.
+- 이 작업이 만든 PR 이벤트로 실행된 것은 `PR CI`뿐이었다. smoke PR들은 `publish.yml` 또는 `deploy.yml`을 실행하지 않았다. 에이전트는 병합·배포·롤백을 수행하지 않았다.
 - 운영 SSH의 승인된 읽기 전용 연결 설정이 없으므로 실제 컨테이너의 SHA, digest, image ID 및 health 상태는 확인하지 않았다. 운영 런타임은 **Unknown / Not Verified**다.
 - 브랜치 보호 설정은 적용하지 않았다.
 
 점검 중 Home `main`에 별도의 push가 발생해 publish workflow run `39986396038`이 실행된 것을 관측했다(`dd92cc85a8df421239327c8238c36c63fc474ea0`, workflow/deploy 단계 성공). 이는 이번에 생성한 `pull_request` CI 테스트와 다른 push 이벤트이며, 에이전트가 유발하지 않았다. 이 배포 후 실제 컨테이너를 관측하지 못했으므로 현재 운영 SHA/digest/health는 여전히 **Unknown**이다. 이 최신 Home SHA의 빌드 digest도 수집되지 않아 이전 배포 digest를 대신 쓰지 않았다.
 
 뒤이어 기존 PR #25 병합으로 Home `main`이 `e216bd3c21b1ec1ddd7a66dd2f791b4f3ce005e4`로 갱신됐고, push 이벤트 Run `39989900060`이 실행됐다. release guard, 이미지 빌드, portal deploy 단계가 모두 성공으로 종료됐다. 이는 다른 작업 흐름의 배포이며 에이전트는 시작·중지·변경하지 않았다. 실제 컨테이너의 SHA/digest/health와 사후 Playwright/SEO QA는 여전히 확인하지 못해 런타임 검증은 미완료다. 배포 로그에는 기존 deploy workflow가 사용하는 checkout/build-push/login/buildx action들의 Node.js 20 deprecation 경고가 있었고 실행기는 Node 24로 강제 전환됐다. 배포 workflow는 이번 작업 범위 밖이라 수정하지 않았다.
+
+따라서 “이번 Phase에서 운영 배포가 발생하지 않았다”는 표현은 틀리다. 정확히는 **에이전트의 PR CI가 배포를 유발하지 않았지만, 별도의 Home main push들이 기존 운영 publish workflow를 실행해 두 차례 배포 단계를 완료했다.**
 
 세부 PR 번호, HEAD SHA, Actions Run ID, workflow commit 및 단계별 결과는 [`configs/phase9d4-main-ci-results.json`](../configs/phase9d4-main-ci-results.json)에 기록했다.
 
