@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { assessMergeDeployGate, assessPostDeploymentVerification, assessRollbackReadiness, classifyDeploymentEvidence, classifyDeploymentRisk, classifyDeploymentRun, deploymentReadiness, listDeploymentRecords, recordDeploymentState } from '../apps/cli/src/deployment-orchestrator.js';
+import { assessMergeDeployGate, assessPostDeploymentVerification, assessRollbackReadiness, classifyDeploymentEvidence, classifyDeploymentRisk, classifyDeploymentRun, deploymentReadiness, listDeploymentRecords, listRuntimeVerifications, recordDeploymentState, recordRuntimeVerification } from '../apps/cli/src/deployment-orchestrator.js';
 
 const priorDb = process.env.WOORI_AGENT_DB_PATH;
 let tempDir: string | undefined;
@@ -49,6 +49,34 @@ describe('Phase 9D merge/deploy gate', () => {
     expect(() => recordDeploymentState({ ...input, service: 'money' })).toThrow(/excluded/i);
     expect(recordDeploymentState({ ...input, service: 'calculator' }).externalActionsPerformed).toBe(false);
   });
+  it('stores append-only runtime evidence and invalidates it when a newer SHA is deployed', () => {
+    db();
+    const laterSha = 'c'.repeat(40);
+    const digest = `sha256:${'a'.repeat(64)}`;
+    recordDeploymentState({ service: 'home', headSha: sha, target: 'main', status: 'Deployed', runId: 100, expectedImageDigest: digest });
+    const first = recordRuntimeVerification({ service: 'home', expectedSha: sha, actualRuntimeSha: sha, revisionLabel: sha, expectedImageDigest: digest, actualImageDigest: digest, imageId: `sha256:${'b'.repeat(64)}`, containerHealth: 'passed', workflowStatus: 'success', deploymentStatus: 'confirmed', postDeployQaStatus: 'not_run', evidenceSource: 'approved read-only docker inspect' });
+    expect(first.status).toBe('Runtime Verified');
+    expect(listRuntimeVerifications()).toHaveLength(1);
+    recordDeploymentState({ service: 'home', headSha: laterSha, target: 'main', status: 'Deployed', runId: 101 });
+    expect(() => recordRuntimeVerification({ service: 'home', expectedSha: sha, containerHealth: 'passed', workflowStatus: 'success', deploymentStatus: 'confirmed', postDeployQaStatus: 'passed', evidenceSource: 'stale' })).toThrow(/stale/i);
+    expect(deploymentReadiness().runtimeVerifications.find(row => row.service === 'home')).toMatchObject({ expectedSha: laterSha, status: 'Deployment Confirmed', currentEvidence: false });
+  });
+  it('does not accept an expected image digest that conflicts with GitHub deployment evidence', () => {
+    db();
+    const expected = `sha256:${'a'.repeat(64)}`;
+    recordDeploymentState({ service: 'home', headSha: sha, target: 'main', status: 'Deployed', runId: 101, expectedImageDigest: expected });
+    expect(() => recordRuntimeVerification({ service: 'home', expectedSha: sha, expectedImageDigest: `sha256:${'c'.repeat(64)}`, containerHealth: 'passed', workflowStatus: 'success', deploymentStatus: 'confirmed', postDeployQaStatus: 'passed', evidenceSource: 'test' })).toThrow(/does not match/i);
+  });
+  it('does not treat partial identity, digest mismatch, or failed health as verified runtime', () => {
+    db();
+    const expected = `sha256:${'e'.repeat(64)}`;
+    const actual = `sha256:${'f'.repeat(64)}`;
+    recordDeploymentState({ service: 'docs', headSha: sha, target: 'main', status: 'Deployed', runId: 102, expectedImageDigest: expected });
+    const base = { service: 'docs', expectedSha: sha, expectedImageDigest: expected, actualImageDigest: actual, actualRuntimeSha: sha, revisionLabel: sha, containerHealth: 'passed' as const, workflowStatus: 'success' as const, deploymentStatus: 'confirmed' as const, postDeployQaStatus: 'not_run' as const, evidenceSource: 'test fixture' };
+    expect(recordRuntimeVerification(base).status).toBe('Failed');
+    expect(recordRuntimeVerification({ ...base, actualImageDigest: expected, containerHealth: 'failed' }).status).toBe('Failed');
+    expect(recordRuntimeVerification({ ...base, actualImageDigest: undefined, actualRuntimeSha: undefined, revisionLabel: undefined }).status).toBe('Deployment Confirmed');
+  });
   it('separates deployment workflow success from post-deployment service verification', () => {
     expect(assessPostDeploymentVerification({ deploymentRun: 'success', containerHealth: 'unknown', httpSmoke: 'passed', playwrightSmoke: 'not_run', pageErrors: null, seoMetadata: 'passed' }).status).toBe('Verification Incomplete');
     expect(assessPostDeploymentVerification({ deploymentRun: 'success', containerHealth: 'passed', httpSmoke: 'failed', playwrightSmoke: 'passed', pageErrors: 0, seoMetadata: 'passed' }).status).toBe('Service Verification Failed');
@@ -56,14 +84,15 @@ describe('Phase 9D merge/deploy gate', () => {
     expect(assessPostDeploymentVerification({ deploymentRun: 'failure', containerHealth: 'unknown', httpSmoke: 'not_run', playwrightSmoke: 'not_run', pageErrors: null, seoMetadata: 'not_run' }).status).toBe('Deployment Failed');
   });
   it('requires matching runtime image identity, healthcheck, and post-deploy QA for full verification', () => {
-    const evidence = { workflowConclusion: 'success' as const, deployStepConclusion: 'success' as const, deploymentSha: sha, runtimeImageRevision: null, runtimeImageDigest: null, expectedImageDigest: 'sha256:abc', healthcheck: 'passed' as const, postDeployQa: 'not_run' as const };
+    const validDigest = `sha256:${'d'.repeat(64)}`;
+    const evidence = { workflowConclusion: 'success' as const, deployStepConclusion: 'success' as const, deploymentSha: sha, runtimeImageRevision: null, runtimeImageDigest: null, expectedImageDigest: validDigest, healthcheck: 'passed' as const, postDeployQa: 'not_run' as const };
     const partial = classifyDeploymentEvidence(evidence);
     expect(partial.workflowSucceeded).toBe(true);
     expect(partial.deploymentConfirmed).toBe(true);
     expect(partial.runtimeVersionConfirmed).toBe(false);
     expect(partial.fullyVerified).toBe(false);
     expect(partial.blockers).toContain('The running container image revision and digest are not confirmed.');
-    expect(classifyDeploymentEvidence({ ...evidence, runtimeImageRevision: sha, runtimeImageDigest: 'sha256:abc', postDeployQa: 'passed' }).status).toBe('Fully Verified');
+    expect(classifyDeploymentEvidence({ ...evidence, runtimeImageRevision: sha, runtimeImageDigest: validDigest, postDeployQa: 'passed' }).status).toBe('Fully Verified');
     expect(classifyDeploymentEvidence({ ...evidence, workflowConclusion: 'failure' }).deploymentConfirmed).toBe(false);
   });
   it('only advertises Home guarded rollback and never enables automatic rollback', () => {
@@ -91,6 +120,6 @@ describe('Phase 9D merge/deploy gate', () => {
     expect(result.workflows).toHaveLength(5);
     expect(result.homeSecurityPromotion.mainNext).toBe('16.4.1');
     expect(result.homeSecurityPromotion.runtimeVersion).toContain('Unconfirmed');
-    expect(result.protectionPlan.mainBranchCi).toContain('develop');
+    expect(result.protectionPlan.mainBranchCi).toContain('main');
   });
 });

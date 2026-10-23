@@ -7,6 +7,8 @@ type Readiness = {
   branchProtection?: string;
   protectionPlan?: { dryRunOnly?: boolean; requiredCheck?: string; adminBypass?: string; currentObservedState?: string; mainBranchCi?: string };
   homeSecurityPromotion?: Workflow;
+  runtimeVerifications?: Workflow[];
+  mainCiSmoke?: { checkedAt?: string; scope?: string; branchProtectionChanged?: boolean; services?: Workflow[] };
   automaticMerge?: boolean;
   automaticDeploy?: boolean;
   automaticRollback?: boolean;
@@ -33,6 +35,28 @@ export function DeploymentReadiness({ data }: { data?: Readiness }) {
       <p>운영 승인 필요: {home.productionApprovalRequired ? '예, 정확한 SHA와 배포 대상을 승인해야 합니다.' : '아니요'} · 에이전트가 병합/배포했는가: {home.mergeOrDeployPerformedByAgent ? '예' : '아니요'}</p>
       {data.evidenceSnapshotAt && <small>증거 스냅샷: {data.evidenceSnapshotAt}</small>}
     </article>}
+    <h3>main 대상 PR CI 실검증</h3>
+    <p className="note">{label(data.mainCiSmoke?.scope)} · 확인 시각: {label(data.mainCiSmoke?.checkedAt)} · 브랜치 보호 변경: {data.mainCiSmoke?.branchProtectionChanged ? '예' : '없음'}</p>
+    <div className="grid">{(data.mainCiSmoke?.services ?? []).map(item => <article className="service" key={String(item.service)}>
+      <h3>{label(item.service)} · {label(item.conclusion)}</h3>
+      <p>PR #{label(item.pr)} · HEAD {label(item.headSha)}</p>
+      <p>검사 {label(item.check)} · Actions Run {label(item.runId)}</p>
+      <p>실행 단계: {Array.isArray(item.steps) ? item.steps.join(', ') : '확인 불가'}</p>
+      <p>PR 상태: {label(item.prState)} · 임시 브랜치 삭제: {item.smokeBranchDeleted ? '예' : '확인 불가'}</p>
+      {item.prUrl && <a href={String(item.prUrl)} target="_blank" rel="noreferrer">검증 PR 기록</a>}
+    </article>)}</div>
+    <h3>운영 런타임 증거</h3>
+    <p className="note">“Deployment Confirmed”는 GitHub 배포 단계 성공을 뜻합니다. 실제 컨테이너 SHA·digest 확인이 없으면 “Runtime Verified” 또는 “Fully Verified”가 아닙니다.</p>
+    <div className="grid">{(data.runtimeVerifications ?? []).map(item => <article className="service" key={String(item.service)}>
+      <h3>{label(item.service)} · {label(item.status)}</h3>
+      <p>Expected SHA: {label(item.expectedSha)} · Runtime SHA: {label(item.record && (item.record as Workflow).actualRuntimeSha)}</p>
+      <p>Expected digest: {label(item.record && (item.record as Workflow).expectedImageDigest)} · Runtime digest: {label(item.record && (item.record as Workflow).actualImageDigest)}</p>
+      <p>Image ID: {label(item.record && (item.record as Workflow).imageId)} · Revision label: {label(item.record && (item.record as Workflow).revisionLabel)}</p>
+      <p>Workflow: {label(item.workflowStatus)} · 배포: {label(item.deploymentStatus)} · Container health: {label(item.record && (item.record as Workflow).containerHealth)} · Post-deploy QA: {label(item.record && (item.record as Workflow).postDeployQaStatus)}</p>
+      <p>Evidence: {label(item.record && (item.record as Workflow).evidenceSource)} · 확인 시각: {label(item.record && (item.record as Workflow).verifiedAt)}</p>
+      {item.record && (item.record as Workflow).failureReason && <p>실패 사유: {label((item.record as Workflow).failureReason)}</p>}
+      {!item.currentEvidence && <small>현재 배포 SHA에 일치하는 런타임 검증 기록이 없습니다.</small>}
+    </article>)}</div>
     <div className="grid">{(data.workflows ?? []).map(item => <article className="service" key={String(item.service)}>
       <h3>{label(item.service)}</h3>
       <p>배포 workflow: {label(item.workflow)} · trigger: {label(item.trigger)}</p>

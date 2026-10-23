@@ -145,6 +145,7 @@ export type DeploymentRecordInput = {
   runId?: number;
   runUrl?: string;
   detail?: string;
+  expectedImageDigest?: string;
   startedAt?: string;
   finishedAt?: string;
 };
@@ -183,13 +184,13 @@ export function classifyDeploymentRun(service: DeploymentService, run: RunEviden
 
 type GhRunner = (args: string[]) => { ok: boolean; stdout: string };
 const runGh: GhRunner = args => {
-  const result = spawnSync('gh', args, { encoding: 'utf8', windowsHide: true, timeout: 15000, maxBuffer: 2_000_000 });
+  const result = spawnSync('gh', args, { encoding: 'utf8', windowsHide: true, timeout: 20000, maxBuffer: 8_000_000 });
   return { ok: result.status === 0, stdout: result.status === 0 ? result.stdout : '' };
 };
 
 /** Opt-in read-only GitHub query; stores deployment step evidence and never dispatches or changes a workflow. */
 export function refreshDeploymentRuns(runner: GhRunner = runGh) {
-  const results: Array<{ service: string; status: string; runId?: number; headSha?: string; evidence?: ReturnType<typeof classifyDeploymentEvidence>; reason?: string }> = [];
+  const results: Array<{ service: string; status: string; runId?: number; headSha?: string; expectedImageDigest?: string; evidence?: ReturnType<typeof classifyDeploymentEvidence>; reason?: string }> = [];
   for (const service of deploymentServices) {
     const listed = runner(['run', 'list', '--repo', service.repository, '--workflow', service.workflow, '--branch', 'main', '--limit', '3', '--json', 'databaseId,workflowName,status,conclusion,url,createdAt,updatedAt,headSha,event,headBranch']);
     if (!listed.ok) { results.push({ service: service.service, status: 'Query Failed', reason: 'Could not read deployment workflow runs; no success was inferred.' }); continue; }
@@ -203,13 +204,34 @@ export function refreshDeploymentRuns(runner: GhRunner = runGh) {
       try { jobs = (JSON.parse(viewed.stdout) as { jobs: JobEvidence[] }).jobs; } catch { results.push({ service: service.service, status: 'Query Failed', runId: run.databaseId, headSha: run.headSha, reason: 'GitHub returned unreadable deployment job evidence.' }); observed = true; break; }
       const classified = classifyDeploymentRun(service, run, jobs);
       if (!classified) continue;
-      recordDeploymentState({ service: service.service, headSha: run.headSha, target: 'main', status: classified.status, runId: run.databaseId, runUrl: run.url ?? undefined, detail: classified.detail, startedAt: classified.startedAt ?? undefined, finishedAt: classified.finishedAt ?? undefined });
-      results.push({ service: service.service, status: classified.status, runId: run.databaseId, headSha: run.headSha, evidence: classified.evidence });
+      const expectedImageDigest = classified.status === 'Deployed' ? extractWorkflowImageDigest(runner(['run', 'view', String(run.databaseId), '--repo', service.repository, '--log']).stdout, service, run) : undefined;
+      recordDeploymentState({ service: service.service, headSha: run.headSha, target: 'main', status: classified.status, runId: run.databaseId, runUrl: run.url ?? undefined, detail: classified.detail, expectedImageDigest, startedAt: classified.startedAt ?? undefined, finishedAt: classified.finishedAt ?? undefined });
+      results.push({ service: service.service, status: classified.status, runId: run.databaseId, headSha: run.headSha, expectedImageDigest, evidence: classified.evidence });
       observed = true; break;
     }
     if (!observed) results.push({ service: service.service, status: 'No Deployment Evidence', reason: 'No recent main workflow run contained a successful/attempted production deploy step.' });
   }
   return { checkedAt: new Date().toISOString(), mode: 'read-only GitHub Actions query', externalActionsPerformed: false, services: results };
+}
+
+function extractWorkflowImageDigest(log: string, service: DeploymentService, run: RunEvidence) {
+  const explicit = /Calculator image digest:\s*(sha256:[a-f0-9]{64})/i.exec(log)?.[1];
+  if (explicit) return explicit;
+  const lines = log.split(/\r?\n/);
+  let pendingDigest: string | undefined;
+  for (const line of lines) {
+    const digest = /"containerimage\.digest"\s*:\s*"(sha256:[a-f0-9]{64})"/i.exec(line)?.[1];
+    if (digest) pendingDigest = digest;
+    const imageName = /"image\.name"\s*:\s*"([^"]+)"/i.exec(line)?.[1];
+    if (imageName && pendingDigest) {
+      const matchingTag = service.service === 'home'
+        ? imageName.includes(`:${run.headSha}-${run.databaseId}-`)
+        : imageName.includes(run.headSha);
+      if (matchingTag) return pendingDigest;
+      pendingDigest = undefined;
+    }
+  }
+  return undefined;
 }
 
 function schema() {
@@ -229,6 +251,7 @@ function schema() {
       DROP TABLE deployment_records_legacy;`);
   }
   db.exec('CREATE INDEX IF NOT EXISTS idx_deployment_records_service ON deployment_records(service, updated_at)');
+  try { db.exec('ALTER TABLE deployment_records ADD COLUMN expected_image_digest TEXT'); } catch { /* existing schema already migrated */ }
   db.close();
 }
 
@@ -242,9 +265,9 @@ export function recordDeploymentState(input: DeploymentRecordInput) {
   const key = input.runId !== undefined ? `run:${input.service}:${input.runId}:${input.target}` : `${input.service}:pr-${input.prNumber}:${input.headSha}:${input.target}`;
   const now = new Date().toISOString();
   const db = initDb();
-  db.prepare(`INSERT INTO deployment_records(deployment_key,service,pr_number,head_sha,target,status,run_id,run_url,detail,started_at,finished_at,created_at,updated_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(deployment_key) DO UPDATE SET status=excluded.status,run_id=excluded.run_id,run_url=excluded.run_url,detail=excluded.detail,started_at=excluded.started_at,finished_at=excluded.finished_at,updated_at=excluded.updated_at`)
-    .run(key, input.service, input.prNumber ?? 0, input.headSha, input.target, input.status, input.runId ?? null, input.runUrl ?? null, input.detail ?? null, input.startedAt ?? null, input.finishedAt ?? null, now, now);
+  db.prepare(`INSERT INTO deployment_records(deployment_key,service,pr_number,head_sha,target,status,run_id,run_url,detail,started_at,finished_at,created_at,updated_at,expected_image_digest)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(deployment_key) DO UPDATE SET status=excluded.status,run_id=excluded.run_id,run_url=excluded.run_url,detail=excluded.detail,started_at=excluded.started_at,finished_at=excluded.finished_at,updated_at=excluded.updated_at,expected_image_digest=COALESCE(excluded.expected_image_digest,deployment_records.expected_image_digest)`)
+    .run(key, input.service, input.prNumber ?? 0, input.headSha, input.target, input.status, input.runId ?? null, input.runUrl ?? null, input.detail ?? null, input.startedAt ?? null, input.finishedAt ?? null, now, now, input.expectedImageDigest ?? null);
   db.close();
   return { deploymentKey: key, stored: true, externalActionsPerformed: false };
 }
@@ -252,16 +275,104 @@ export function recordDeploymentState(input: DeploymentRecordInput) {
 export function listDeploymentRecords(limit = 50) {
   schema();
   const db = initDb();
-  const records = db.prepare('SELECT deployment_key AS deploymentKey,service,pr_number AS prNumber,head_sha AS headSha,target,status,run_id AS runId,run_url AS runUrl,detail,started_at AS startedAt,finished_at AS finishedAt,created_at AS createdAt,updated_at AS updatedAt FROM deployment_records ORDER BY updated_at DESC LIMIT ?').all(Math.max(1, Math.min(200, limit)));
+  const records = db.prepare('SELECT deployment_key AS deploymentKey,service,pr_number AS prNumber,head_sha AS headSha,target,status,run_id AS runId,run_url AS runUrl,detail,started_at AS startedAt,finished_at AS finishedAt,created_at AS createdAt,updated_at AS updatedAt,expected_image_digest AS expectedImageDigest FROM deployment_records ORDER BY updated_at DESC LIMIT ?').all(Math.max(1, Math.min(200, limit)));
   db.close();
   return records;
 }
 
+export type RuntimeVerificationInput = {
+  service: string;
+  expectedSha: string;
+  actualRuntimeSha?: string;
+  expectedImageDigest?: string;
+  actualImageDigest?: string;
+  imageId?: string;
+  revisionLabel?: string;
+  containerHealth: 'passed' | 'failed' | 'unknown';
+  workflowStatus: 'success' | 'failure' | 'unknown';
+  deploymentStatus: 'confirmed' | 'failed' | 'unknown';
+  postDeployQaStatus: 'passed' | 'failed' | 'not_run';
+  evidenceSource: string;
+  failureReason?: string;
+};
+
+const runtimeVerificationServices = new Set(['home', 'calculator', 'tools', 'docs', 'quiz']);
+
+function runtimeVerificationSchema() {
+  const db = initDb();
+  db.exec(`CREATE TABLE IF NOT EXISTS deployment_verifications(
+    verification_id TEXT PRIMARY KEY, service TEXT NOT NULL, expected_sha TEXT NOT NULL,
+    actual_runtime_sha TEXT, expected_image_digest TEXT, actual_image_digest TEXT, image_id TEXT,
+    revision_label TEXT, container_health TEXT NOT NULL, workflow_status TEXT NOT NULL,
+    deployment_status TEXT NOT NULL, post_deploy_qa_status TEXT NOT NULL, verification_status TEXT NOT NULL,
+    verified_at TEXT NOT NULL, evidence_source TEXT NOT NULL, failure_reason TEXT, run_id INTEGER,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_deployment_verifications_service_time ON deployment_verifications(service, verified_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_deployment_verifications_service_sha ON deployment_verifications(service, expected_sha, verified_at DESC);`);
+  db.close();
+}
+
+function runtimeVerificationStatus(input: RuntimeVerificationInput) {
+  const revisionProvided = Boolean(input.actualRuntimeSha && input.revisionLabel);
+  const revisionMatches = Boolean(revisionProvided && input.actualRuntimeSha === input.expectedSha && input.revisionLabel === input.expectedSha);
+  const revisionMismatch = Boolean((input.actualRuntimeSha && input.actualRuntimeSha !== input.expectedSha) || (input.revisionLabel && input.revisionLabel !== input.expectedSha));
+  const digestProvided = Boolean(input.expectedImageDigest && input.actualImageDigest);
+  const digestMatches = Boolean(digestProvided && input.expectedImageDigest === input.actualImageDigest);
+  const digestMismatch = Boolean(digestProvided && !digestMatches);
+  if (input.workflowStatus === 'failure' || input.deploymentStatus === 'failed' || input.containerHealth === 'failed' || input.postDeployQaStatus === 'failed') return 'Failed';
+  if (revisionMismatch || digestMismatch) return 'Failed';
+  if (input.workflowStatus !== 'success') return 'Unknown';
+  if (input.deploymentStatus !== 'confirmed') return 'Workflow Succeeded';
+  if (input.postDeployQaStatus === 'passed' && (!revisionMatches || !digestMatches || input.containerHealth !== 'passed')) return 'Post-deploy QA Passed';
+  if (!revisionProvided || !revisionMatches || !digestMatches || input.containerHealth !== 'passed') return 'Deployment Confirmed';
+  if (input.postDeployQaStatus === 'passed') return 'Fully Verified';
+  return 'Runtime Verified';
+}
+
+/** Append-only manual evidence record. The expected SHA must match the latest recorded deployment for this service. */
+export function recordRuntimeVerification(input: RuntimeVerificationInput) {
+  if (!runtimeVerificationServices.has(input.service)) throw new Error('Service is excluded from runtime verification.');
+  if (!shaPattern.test(input.expectedSha) || (input.actualRuntimeSha && !shaPattern.test(input.actualRuntimeSha))) throw new Error('Expected and actual runtime SHA values must be full commit SHAs.');
+  const digestPattern = /^sha256:[a-f0-9]{64}$/i;
+  if ((input.expectedImageDigest && !digestPattern.test(input.expectedImageDigest)) || (input.actualImageDigest && !digestPattern.test(input.actualImageDigest))) throw new Error('Image digests must use the sha256:<64 hex> format.');
+  if (input.revisionLabel && !shaPattern.test(input.revisionLabel)) throw new Error('OCI revision label must be a full commit SHA.');
+  if (!input.evidenceSource.trim()) throw new Error('An evidence source is required.');
+  const latest = listDeploymentRecords(200) as Array<{ service: string; target: string; headSha: string; status: string; runId: number | null; expectedImageDigest: string | null }>;
+  const current = latest.find(item => item.service === input.service && item.target === 'main' && ['Deployed', 'Verified'].includes(item.status));
+  if (!current || current.headSha !== input.expectedSha) throw new Error('Verification SHA is stale or has no matching latest successful deployment record.');
+  if (input.expectedImageDigest && current.expectedImageDigest && input.expectedImageDigest !== current.expectedImageDigest) throw new Error('Expected image digest does not match the latest GitHub deployment evidence.');
+  const evidenceInput = { ...input, expectedImageDigest: current.expectedImageDigest ?? undefined };
+  const status = runtimeVerificationStatus(evidenceInput);
+  const verificationId = `${input.service}:${input.expectedSha}:${new Date().toISOString()}`;
+  const verifiedAt = new Date().toISOString();
+  runtimeVerificationSchema();
+  const db = initDb();
+  db.prepare(`INSERT INTO deployment_verifications(verification_id,service,expected_sha,actual_runtime_sha,expected_image_digest,actual_image_digest,image_id,revision_label,container_health,workflow_status,deployment_status,post_deploy_qa_status,verification_status,verified_at,evidence_source,failure_reason,run_id,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(verificationId,input.service,input.expectedSha,input.actualRuntimeSha??null,current.expectedImageDigest??null,input.actualImageDigest??null,input.imageId??null,input.revisionLabel??null,input.containerHealth,input.workflowStatus,input.deploymentStatus,input.postDeployQaStatus,status,verifiedAt,input.evidenceSource.trim(),input.failureReason??null,current.runId??null,verifiedAt);
+  db.close();
+  return { verificationId, service: input.service, expectedSha: input.expectedSha, status, stored: true };
+}
+
+export function listRuntimeVerifications(limit = 100) {
+  runtimeVerificationSchema();
+  const db = initDb();
+  const rows = db.prepare(`SELECT verification_id AS verificationId,service,expected_sha AS expectedSha,actual_runtime_sha AS actualRuntimeSha,expected_image_digest AS expectedImageDigest,actual_image_digest AS actualImageDigest,image_id AS imageId,revision_label AS revisionLabel,container_health AS containerHealth,workflow_status AS workflowStatus,deployment_status AS deploymentStatus,post_deploy_qa_status AS postDeployQaStatus,verification_status AS status,verified_at AS verifiedAt,evidence_source AS evidenceSource,failure_reason AS failureReason,run_id AS runId FROM deployment_verifications ORDER BY verified_at DESC LIMIT ?`).all(Math.max(1, Math.min(500, limit))) as Array<Record<string, unknown>>;
+  db.close();
+  return rows;
+}
+
+function currentRuntimeVerificationStatus(service: string, expectedSha: string, verificationRows: Array<Record<string, unknown>>, deploymentStatus: string) {
+  const record = verificationRows.find(row => row.service === service);
+  if (!record || record.expectedSha !== expectedSha) return { status: deploymentStatus === 'Deployed' || deploymentStatus === 'Verified' ? 'Deployment Confirmed' : deploymentStatus === 'Failed' ? 'Failed' : 'Unknown', currentEvidence: false, record: null };
+  return { status: String(record.status), currentEvidence: true, record };
+}
+
 /** Static, read-only readiness snapshot. Workflow presence is not evidence of a successful deployment. */
 export function deploymentReadiness() {
-  const snapshotAt = '2026-10-23T14:49:47Z';
+  const snapshotAt = '2026-10-23T16:54:24Z';
   const workflowEvidence = [
-    { service: 'home', workflow: 'publish.yml', trigger: 'push to main; workflow_dispatch; schedule', deployRisk: 'High', mainNextVersion: '16.4.1 at main SHA 8414cbf2d6ca1440bcec5135448d8b45db031f45', developNextVersion: '16.4.1 at develop SHA 614a1f122f9423d1ea0ac7fbf6e7d23bcf51f257 (develop is 61 commits behind main)', runtimeNextVersion: 'Unconfirmed: successful deployment workflow identifies artifact SHA/digest, but no read-only inspection of the currently running VPS container was available', observedDeploymentRunId: 39963970414, observedDeploymentSha: '8414cbf2d6ca1440bcec5135448d8b45db031f45', observedDeploymentConclusion: 'success; image publish and portal deploy steps succeeded; Docker health and HTTP checks were logged', runtimeVersionConfirmed: false, postDeployQa: 'Not Configured: deployment workflow smoke checks are not Playwright/SEO post-deploy QA', rollback: 'Run 39953548770 reached HTTP smoke and got 503, then invoked rollback; rollback completion is unconfirmed. Later successful deployment run 39963970414 supersedes it at workflow level.' },
+    { service: 'home', workflow: 'publish.yml', trigger: 'push to main; workflow_dispatch; schedule', deployRisk: 'High', mainNextVersion: '16.4.1 at main SHA e216bd3c21b1ec1ddd7a66dd2f791b4f3ce005e4', developNextVersion: '16.4.1 at develop (latest observed develop SHA b72773094deee348659e4fb0d21c7350e9f6b229)', runtimeNextVersion: 'Unconfirmed: latest main push deployment succeeded, but no read-only inspection of the currently running VPS container was available', observedDeploymentRunId: 39989900060, observedDeploymentSha: 'e216bd3c21b1ec1ddd7a66dd2f791b4f3ce005e4', observedDeploymentConclusion: 'success; independent push event, image build and portal deployment steps succeeded. This was not triggered by Phase 9D-4 PR CI.', expectedImageDigest: null, runtimeVersionConfirmed: false, postDeployQa: 'Not Configured: deployment workflow smoke checks are not Playwright/SEO post-deploy QA', rollback: 'Run 39953548770 reached HTTP smoke and got 503, then invoked rollback; rollback completion is unconfirmed.' },
     { service: 'calculator', workflow: 'deploy.yml', trigger: 'push to main', deployRisk: 'High', lastKnownFailureRunId: 39936981274, lastKnownFailureSha: 'caa5b2de713dca6cc8dfd3b115bf3721c8344dc6', lastKnownFailure: 'Build/push succeeded; remote Compose interpolation failed before pull/up because Portal-required environment values were absent from the .env.moneybook invocation. No evidence that calculator container changed in this failed run.', laterSuccessRunId: 39965563732, laterSuccessSha: 'caffc59985826d3dbf9fe549db008e64b59a853f', laterWorkflowStatus: 'success, including deploy and route/locale/sitemap validation', healthcheck: 'Workflow route/sitemap checks succeeded; no direct running-image inspection recorded', rollback: 'No verified rollback mechanism recorded' },
     { service: 'tools', workflow: 'deploy.yml', trigger: 'push to main', deployRisk: 'High', healthcheck: 'robots.txt HTTP check only', rollback: 'Not configured/verified' },
     { service: 'docs', workflow: 'deploy.yml', trigger: 'push to main', deployRisk: 'High', healthcheck: 'Conditional /ko/docs HTTP check', rollback: 'Not configured/verified' },
@@ -273,13 +384,21 @@ export function deploymentReadiness() {
     mode: 'read-only readiness; merge/deploy/rollback disabled',
     productionTarget: 'main',
     branchProtection: 'Not Configured; no protection rules were changed',
-    protectionPlan: { dryRunOnly: true, branches: ['develop', 'main'], requirePullRequest: true, requiredCheck: 'validate', blockForcePush: true, blockDeletion: true, adminBypass: 'Review separately before application; not configured', currentObservedState: 'Home main/develop protection API returned unprotected and rulesets count was zero. Previous five-repository inspection is recorded in docs; this refresh queried Home only.', mainBranchCi: 'Home pr-ci.yml currently triggers only pull_request to develop; do not require validate on main until a main-targeting PR CI run succeeds.' },
-    homeSecurityPromotion: { status: 'Security dependency version is present on main and develop; branch promotion is not pending for this dependency', mainSha: '8414cbf2d6ca1440bcec5135448d8b45db031f45', developSha: '614a1f122f9423d1ea0ac7fbf6e7d23bcf51f257', mainNext: '16.4.1', developNext: '16.4.1', lockfileNext: '16.4.1 on both refs', currentMainCi: 'PR CI is configured for develop only; no current-main targeted PR validation evidence was found', latestSuccessfulDeployRun: 39963970414, latestSuccessfulDeploySha: '8414cbf2d6ca1440bcec5135448d8b45db031f45', runtimeVersion: 'Unconfirmed: require operator-side read-only docker inspect/image label check', productionApprovalRequired: true, mergeOrDeployPerformedByAgent: false },
+    protectionPlan: { dryRunOnly: true, branches: ['develop', 'main'], requirePullRequest: true, requiredCheck: 'validate', blockForcePush: true, blockDeletion: true, adminBypass: 'Review separately before application; not configured', currentObservedState: 'All five repositories were previously observed unprotected; fresh 2026-10-23 Home query also returned unprotected with zero rulesets. Protections were not changed.', mainBranchCi: 'All five main-target Draft PR smoke checks succeeded, but PRs were closed without merge. Do not require validate on main until the workflow is merged to main and a main-configured check succeeds.' },
+    homeSecurityPromotion: { status: 'Next.js 16.4.1 is present on the latest inspected main SHA; production runtime remains unconfirmed', mainSha: 'e216bd3c21b1ec1ddd7a66dd2f791b4f3ce005e4', developSha: 'b72773094deee348659e4fb0d21c7350e9f6b229', mainNext: '16.4.1', developNext: '16.4.1', lockfileNext: '16.4.1 on the inspected main revision', currentMainCi: 'main-target PR CI smoke succeeded in closed, unmerged PR #24 (run 39986317222); workflow is not yet present on main', latestSuccessfulDeployRun: 39989900060, latestSuccessfulDeploySha: 'e216bd3c21b1ec1ddd7a66dd2f791b4f3ce005e4', runtimeVersion: 'Unconfirmed: latest successful workflow does not establish which container is currently running; approved read-only VPS inspection was unavailable', productionApprovalRequired: true, mergeOrDeployPerformedByAgent: false },
     approvals: 'No actionable dashboard approval control; exact SHA and target approval is required by the gate contract',
     automaticMerge: false,
     automaticDeploy: false,
     automaticRollback: false,
     workflows: workflowEvidence,
-    records: listDeploymentRecords()
+    records: listDeploymentRecords(),
+    runtimeVerifications: (() => {
+      const records = listDeploymentRecords(200) as Array<{ service: string; target: string; headSha: string; status: string; runId?: number }>;
+      const verifications = listRuntimeVerifications(500) as Array<Record<string, unknown>>;
+      return [...runtimeVerificationServices].map(service => {
+        const deployment = records.find(item => item.service === service && item.target === 'main');
+        return { service, expectedSha: deployment?.headSha ?? null, workflowStatus: deployment?.status === 'Failed' ? 'failure' : deployment?.status === 'Deployed' || deployment?.status === 'Verified' ? 'success' : 'unknown', deploymentStatus: deployment?.status ?? 'Unknown', ...deployment ? currentRuntimeVerificationStatus(service, deployment.headSha, verifications, deployment.status) : { status: 'Unknown', currentEvidence: false, record: null } };
+      });
+    })()
   };
 }

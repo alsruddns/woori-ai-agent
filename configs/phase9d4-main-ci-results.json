@@ -1,0 +1,111 @@
+{
+  "checkedAt": "2026-10-24T01:54:24+09:00",
+  "repositoryHeadsObserved": {
+    "home": {"develop": "b72773094deee348659e4fb0d21c7350e9f6b229", "main": "e216bd3c21b1ec1ddd7a66dd2f791b4f3ce005e4"},
+    "calculator": {"develop": "78b434404099d8320f2374251c3c14e55c43b075", "main": "caffc59985826d3dbf9fe549db008e64b59a853f"},
+    "tools": {"develop": "6111e1d07ef429588f9ecf04b205156761e6162d", "main": "10023c589985d0bfa7c1824b68754106615f3b33"},
+    "docs": {"develop": "071aab9544f7c8b1572771aa7a0bfe954b857696", "main": "9cd4a3d3db3ca4c2f93faf22d21e1fb4de75858b"},
+    "quiz": {"develop": "5fcdd953d82b387cc33c12107311d4f1553fe671", "main": "bf6c938bed80ebd543b46cde119450d78c60e61f"}
+  },
+  "scope": "Temporary workflow-only draft PRs targeting main; none merged",
+  "result": "All five validate checks succeeded",
+  "productionDeploymentsTriggered": false,
+  "branchProtectionChanged": false,
+  "services": [
+    {
+      "service": "home",
+      "repository": "alsruddns/woori-home",
+      "pr": 24,
+      "prUrl": "https://github.com/alsruddns/woori-home/pull/24",
+      "headSha": "082a8772f1b0a963c10230b76a0fc7492136d1d1",
+      "runId": 39986317222,
+      "check": "validate",
+      "conclusion": "success",
+      "steps": ["lint", "test", "build"],
+      "prState": "closed_without_merge",
+      "smokeBranchDeleted": true,
+      "developWorkflowCommit": "28e9cee66115cb7bfd23f91402856c6971e13f3d"
+    },
+    {
+      "service": "calculator",
+      "repository": "alsruddns/woori-calculator",
+      "pr": 26,
+      "prUrl": "https://github.com/alsruddns/woori-calculator/pull/26",
+      "headSha": "07a9732acc85a5d3682d3f489165bff89d92396a",
+      "runId": 39986537885,
+      "check": "validate",
+      "conclusion": "success",
+      "steps": ["lint", "test", "typecheck", "build"],
+      "prState": "closed_without_merge",
+      "smokeBranchDeleted": true,
+      "developWorkflowCommit": "78b434404099d8320f2374251c3c14e55c43b075",
+      "featureCodeChanged": false
+    },
+    {
+      "service": "tools",
+      "repository": "alsruddns/woori-tools",
+      "pr": 18,
+      "prUrl": "https://github.com/alsruddns/woori-tools/pull/18",
+      "headSha": "4713b0e7fd42ab4f854f9453d856523edb89e7c7",
+      "runId": 39988246466,
+      "check": "validate",
+      "conclusion": "success",
+      "steps": ["lint", "test", "check:service-catalog", "build"],
+      "prState": "closed_without_merge",
+      "smokeBranchDeleted": true,
+      "developWorkflowCommit": "2339485",
+      "preservedConcurrentDevelopCommit": "c0e4936"
+    },
+    {
+      "service": "docs",
+      "repository": "alsrddns/woori-docs",
+      "pr": 5,
+      "prUrl": "https://github.com/alsruddns/woori-docs/pull/5",
+      "headSha": "98b934649641b5044e63218be2ba382de32c3256",
+      "runId": 39988482746,
+      "check": "validate",
+      "conclusion": "success",
+      "steps": ["test", "lint", "typecheck", "build"],
+      "prState": "closed_without_merge",
+      "smokeBranchDeleted": true,
+      "developWorkflowCommit": "071aab9544f7c8b1572771aa7a0bfe954b857696"
+    },
+    {
+      "service": "quiz",
+      "repository": "alsruddns/woori-quiz",
+      "pr": 6,
+      "prUrl": "https://github.com/alsruddns/woori-quiz/pull/6",
+      "headSha": "3d1a099f518f4b340166bd2419bb5dc340b41467",
+      "runId": 39988679641,
+      "check": "validate",
+      "conclusion": "success",
+      "steps": ["test", "lint", "typecheck", "localization-quality", "build"],
+      "prState": "closed_without_merge",
+      "smokeBranchDeleted": true,
+      "developWorkflowCommit": "2247b37aef5a97cebd79955ef95541ad52c09883"
+    }
+  ],
+  "runtimeVerification": {
+    "status": "unknown",
+    "reason": "No approved read-only production SSH access was configured. GitHub workflow SHA and build digests do not prove which image is running now.",
+    "productionAccessAttempted": false,
+    "workflowDispatchAttempted": false,
+      "latestHomeDeploymentObservedDuringReview": {
+      "runId": 39989900060,
+      "event": "push",
+      "sha": "e216bd3c21b1ec1ddd7a66dd2f791b4f3ce005e4",
+      "workflowConclusion": "success",
+      "imageJob": "success",
+      "deployStepConclusion": "success",
+      "expectedImageDigest": null,
+      "runtimeContainerObserved": false,
+      "relationToPhase9d4": "Independent merge-to-main push and publish workflow; none of the Phase 9D-4 pull_request smoke runs triggered it",
+      "warning": "Existing deployment workflow emitted Node.js 20 deprecation notices for checkout/build-push/login/buildx actions; GitHub forced Node 24. Deployment workflow was not modified."
+    }
+  },
+  "branchProtection": {
+    "status": "not_applied",
+    "develop": "Previously observed unprotected; apply only after adopting PR-first pushes.",
+    "main": "Do not require validate until the PR workflow is merged to main and a main-target check succeeds from the main configuration."
+  }
+}
