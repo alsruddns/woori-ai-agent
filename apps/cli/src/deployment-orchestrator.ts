@@ -90,6 +90,46 @@ export function assessPostDeploymentVerification(input: {
   return { status: 'Verified', serviceHealthy: true, blockers: [] };
 }
 
+export type DeploymentEvidence = {
+  workflowConclusion: 'success' | 'failure' | 'cancelled' | 'unknown';
+  deployStepConclusion: 'success' | 'failure' | 'skipped' | 'unknown';
+  deploymentSha: string | null;
+  runtimeImageRevision: string | null;
+  runtimeImageDigest: string | null;
+  expectedImageDigest: string | null;
+  healthcheck: 'passed' | 'failed' | 'unknown';
+  postDeployQa: 'passed' | 'failed' | 'not_run';
+};
+
+/** Keeps workflow, deployment, runtime identity, health, and browser QA as separate evidence claims. */
+export function classifyDeploymentEvidence(input: DeploymentEvidence) {
+  const workflowSucceeded = input.workflowConclusion === 'success';
+  const deploymentConfirmed = workflowSucceeded && input.deployStepConclusion === 'success';
+  const runtimeVersionConfirmed = Boolean(
+    deploymentConfirmed && input.deploymentSha && input.runtimeImageRevision === input.deploymentSha &&
+    input.runtimeImageDigest && input.expectedImageDigest === input.runtimeImageDigest
+  );
+  const healthcheckPassed = deploymentConfirmed && input.healthcheck === 'passed';
+  const postDeployQaPassed = deploymentConfirmed && input.postDeployQa === 'passed';
+  const fullyVerified = workflowSucceeded && deploymentConfirmed && runtimeVersionConfirmed && healthcheckPassed && postDeployQaPassed;
+  return {
+    workflowSucceeded,
+    deploymentConfirmed,
+    runtimeVersionConfirmed,
+    healthcheckPassed,
+    postDeployQaPassed,
+    fullyVerified,
+    status: fullyVerified ? 'Fully Verified' : workflowSucceeded ? 'Workflow Succeeded' : input.workflowConclusion === 'failure' ? 'Workflow Failed' : 'Unconfirmed',
+    blockers: [
+      ...(!workflowSucceeded ? ['Deployment workflow has not succeeded.'] : []),
+      ...(workflowSucceeded && !deploymentConfirmed ? ['The deployment step has no successful result.'] : []),
+      ...(deploymentConfirmed && !runtimeVersionConfirmed ? ['The running container image revision and digest are not confirmed.'] : []),
+      ...(deploymentConfirmed && !healthcheckPassed ? ['A passing runtime healthcheck is not recorded.'] : []),
+      ...(deploymentConfirmed && !postDeployQaPassed ? ['Post-deployment Playwright/SEO QA is not recorded as passed.'] : [])
+    ]
+  };
+}
+
 export function assessRollbackReadiness(service: string) {
   if (service === 'home') return { status: 'Guarded workflow path exists; operator approval and run-specific review required', automatic: false };
   if (deployableServices.has(service)) return { status: 'Not Configured: no verified rollback mechanism recorded', automatic: false };
@@ -123,12 +163,22 @@ type JobEvidence = { name: string; status: string; conclusion: string | null; st
 
 export function classifyDeploymentRun(service: DeploymentService, run: RunEvidence, jobs: JobEvidence[]) {
   if (run.headBranch !== 'main' || !['push', 'workflow_dispatch', 'schedule'].includes(run.event)) return null;
+  const evidence = (deployStepConclusion: DeploymentEvidence['deployStepConclusion']) => classifyDeploymentEvidence({
+    workflowConclusion: (['success', 'failure', 'cancelled'].includes(run.conclusion ?? '') ? run.conclusion : 'unknown') as DeploymentEvidence['workflowConclusion'],
+    deployStepConclusion,
+    deploymentSha: run.headSha,
+    runtimeImageRevision: null,
+    runtimeImageDigest: null,
+    expectedImageDigest: null,
+    healthcheck: 'unknown',
+    postDeployQa: 'not_run'
+  });
   const deployJob = jobs.find(job => job.name === service.job);
   const step = deployJob?.steps.find(item => item.name === service.deployStep);
   if (!deployJob || !step || step.conclusion === 'skipped') return null;
-  if (step.status !== 'completed') return { status: 'Deploying' as const, detail: `GitHub deployment step is ${step.status}.`, startedAt: deployJob.startedAt ?? run.createdAt, finishedAt: null };
-  if (step.conclusion !== 'success') return { status: 'Failed' as const, detail: `GitHub deployment step concluded ${step.conclusion ?? 'without a result'}; deployment and service state need review.`, startedAt: deployJob.startedAt ?? run.createdAt, finishedAt: deployJob.completedAt ?? run.updatedAt };
-  return { status: 'Deployed' as const, detail: `Deployment step succeeded in workflow ${run.workflowName}; post-deployment service verification is a separate status.`, startedAt: deployJob.startedAt ?? run.createdAt, finishedAt: deployJob.completedAt ?? run.updatedAt };
+  if (step.status !== 'completed') return { status: 'Deploying' as const, evidence: evidence('unknown'), detail: `GitHub deployment step is ${step.status}.`, startedAt: deployJob.startedAt ?? run.createdAt, finishedAt: null };
+  if (step.conclusion !== 'success') return { status: 'Failed' as const, evidence: evidence('failure'), detail: `GitHub deployment step concluded ${step.conclusion ?? 'without a result'}; deployment and service state need review.`, startedAt: deployJob.startedAt ?? run.createdAt, finishedAt: deployJob.completedAt ?? run.updatedAt };
+  return { status: 'Deployed' as const, evidence: evidence('success'), detail: `Deployment step succeeded in workflow ${run.workflowName}; runtime image identity, healthcheck evidence, and post-deployment QA remain separately unconfirmed.`, startedAt: deployJob.startedAt ?? run.createdAt, finishedAt: deployJob.completedAt ?? run.updatedAt };
 }
 
 type GhRunner = (args: string[]) => { ok: boolean; stdout: string };
@@ -139,7 +189,7 @@ const runGh: GhRunner = args => {
 
 /** Opt-in read-only GitHub query; stores deployment step evidence and never dispatches or changes a workflow. */
 export function refreshDeploymentRuns(runner: GhRunner = runGh) {
-  const results: Array<{ service: string; status: string; runId?: number; headSha?: string; reason?: string }> = [];
+  const results: Array<{ service: string; status: string; runId?: number; headSha?: string; evidence?: ReturnType<typeof classifyDeploymentEvidence>; reason?: string }> = [];
   for (const service of deploymentServices) {
     const listed = runner(['run', 'list', '--repo', service.repository, '--workflow', service.workflow, '--branch', 'main', '--limit', '3', '--json', 'databaseId,workflowName,status,conclusion,url,createdAt,updatedAt,headSha,event,headBranch']);
     if (!listed.ok) { results.push({ service: service.service, status: 'Query Failed', reason: 'Could not read deployment workflow runs; no success was inferred.' }); continue; }
@@ -154,7 +204,7 @@ export function refreshDeploymentRuns(runner: GhRunner = runGh) {
       const classified = classifyDeploymentRun(service, run, jobs);
       if (!classified) continue;
       recordDeploymentState({ service: service.service, headSha: run.headSha, target: 'main', status: classified.status, runId: run.databaseId, runUrl: run.url ?? undefined, detail: classified.detail, startedAt: classified.startedAt ?? undefined, finishedAt: classified.finishedAt ?? undefined });
-      results.push({ service: service.service, status: classified.status, runId: run.databaseId, headSha: run.headSha });
+      results.push({ service: service.service, status: classified.status, runId: run.databaseId, headSha: run.headSha, evidence: classified.evidence });
       observed = true; break;
     }
     if (!observed) results.push({ service: service.service, status: 'No Deployment Evidence', reason: 'No recent main workflow run contained a successful/attempted production deploy step.' });
@@ -209,19 +259,22 @@ export function listDeploymentRecords(limit = 50) {
 
 /** Static, read-only readiness snapshot. Workflow presence is not evidence of a successful deployment. */
 export function deploymentReadiness() {
+  const snapshotAt = '2026-10-23T14:49:47Z';
   const workflowEvidence = [
-    { service: 'home', workflow: 'publish.yml', trigger: 'push to main; workflow_dispatch; schedule', deployRisk: 'High', mainNextVersion: '16.4.0 (main manifest)', developNextVersion: '16.4.1 (Phase 9D-1.6 security patch)', runtimeNextVersion: 'Unconfirmed: run 39952775377 successfully deployed a build from the 16.4.0 manifest, but newer run 39953548770 failed in the deploy step; public HTTP does not expose the installed version', observedDeploymentRunId: 39953548770, observedDeploymentConclusion: 'failure in Deploy only the portal service; rollback outcome/current image unconfirmed', healthcheck: 'Workflow contains Portal HTTP + Docker health checks; latest deployment attempt failed before successful verification', rollback: 'Workflow contains guarded rollback, but completion/health of rollback was not verified' },
-    { service: 'calculator', workflow: 'deploy.yml', trigger: 'push to main', deployRisk: 'High', healthcheck: 'Routes + sitemap + IndexNow validation; no verified container health evidence', rollback: 'Not configured/verified' },
+    { service: 'home', workflow: 'publish.yml', trigger: 'push to main; workflow_dispatch; schedule', deployRisk: 'High', mainNextVersion: '16.4.1 at main SHA 8414cbf2d6ca1440bcec5135448d8b45db031f45', developNextVersion: '16.4.1 at develop SHA 614a1f122f9423d1ea0ac7fbf6e7d23bcf51f257 (develop is 61 commits behind main)', runtimeNextVersion: 'Unconfirmed: successful deployment workflow identifies artifact SHA/digest, but no read-only inspection of the currently running VPS container was available', observedDeploymentRunId: 39963970414, observedDeploymentSha: '8414cbf2d6ca1440bcec5135448d8b45db031f45', observedDeploymentConclusion: 'success; image publish and portal deploy steps succeeded; Docker health and HTTP checks were logged', runtimeVersionConfirmed: false, postDeployQa: 'Not Configured: deployment workflow smoke checks are not Playwright/SEO post-deploy QA', rollback: 'Run 39953548770 reached HTTP smoke and got 503, then invoked rollback; rollback completion is unconfirmed. Later successful deployment run 39963970414 supersedes it at workflow level.' },
+    { service: 'calculator', workflow: 'deploy.yml', trigger: 'push to main', deployRisk: 'High', lastKnownFailureRunId: 39936981274, lastKnownFailureSha: 'caa5b2de713dca6cc8dfd3b115bf3721c8344dc6', lastKnownFailure: 'Build/push succeeded; remote Compose interpolation failed before pull/up because Portal-required environment values were absent from the .env.moneybook invocation. No evidence that calculator container changed in this failed run.', laterSuccessRunId: 39965563732, laterSuccessSha: 'caffc59985826d3dbf9fe549db008e64b59a853f', laterWorkflowStatus: 'success, including deploy and route/locale/sitemap validation', healthcheck: 'Workflow route/sitemap checks succeeded; no direct running-image inspection recorded', rollback: 'No verified rollback mechanism recorded' },
     { service: 'tools', workflow: 'deploy.yml', trigger: 'push to main', deployRisk: 'High', healthcheck: 'robots.txt HTTP check only', rollback: 'Not configured/verified' },
     { service: 'docs', workflow: 'deploy.yml', trigger: 'push to main', deployRisk: 'High', healthcheck: 'Conditional /ko/docs HTTP check', rollback: 'Not configured/verified' },
     { service: 'quiz', workflow: 'deploy.yml', trigger: 'push to main', deployRisk: 'High', healthcheck: '/ko/quiz HTTP check', rollback: 'Not configured/verified' }
   ];
   return {
     checkedAt: new Date().toISOString(),
+    evidenceSnapshotAt: snapshotAt,
     mode: 'read-only readiness; merge/deploy/rollback disabled',
     productionTarget: 'main',
     branchProtection: 'Not Configured; no protection rules were changed',
-    protectionPlan: { dryRunOnly: true, branches: ['develop', 'main'], requirePullRequest: true, requiredCheck: 'validate', blockForcePush: true, blockDeletion: true, adminBypass: 'Review separately before application; not configured', currentObservedState: 'All five repositories: develop/main unprotected; repository rulesets: none' },
+    protectionPlan: { dryRunOnly: true, branches: ['develop', 'main'], requirePullRequest: true, requiredCheck: 'validate', blockForcePush: true, blockDeletion: true, adminBypass: 'Review separately before application; not configured', currentObservedState: 'Home main/develop protection API returned unprotected and rulesets count was zero. Previous five-repository inspection is recorded in docs; this refresh queried Home only.', mainBranchCi: 'Home pr-ci.yml currently triggers only pull_request to develop; do not require validate on main until a main-targeting PR CI run succeeds.' },
+    homeSecurityPromotion: { status: 'Security dependency version is present on main and develop; branch promotion is not pending for this dependency', mainSha: '8414cbf2d6ca1440bcec5135448d8b45db031f45', developSha: '614a1f122f9423d1ea0ac7fbf6e7d23bcf51f257', mainNext: '16.4.1', developNext: '16.4.1', lockfileNext: '16.4.1 on both refs', currentMainCi: 'PR CI is configured for develop only; no current-main targeted PR validation evidence was found', latestSuccessfulDeployRun: 39963970414, latestSuccessfulDeploySha: '8414cbf2d6ca1440bcec5135448d8b45db031f45', runtimeVersion: 'Unconfirmed: require operator-side read-only docker inspect/image label check', productionApprovalRequired: true, mergeOrDeployPerformedByAgent: false },
     approvals: 'No actionable dashboard approval control; exact SHA and target approval is required by the gate contract',
     automaticMerge: false,
     automaticDeploy: false,

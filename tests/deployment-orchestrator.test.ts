@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { assessMergeDeployGate, assessPostDeploymentVerification, assessRollbackReadiness, classifyDeploymentRisk, classifyDeploymentRun, deploymentReadiness, listDeploymentRecords, recordDeploymentState } from '../apps/cli/src/deployment-orchestrator.js';
+import { assessMergeDeployGate, assessPostDeploymentVerification, assessRollbackReadiness, classifyDeploymentEvidence, classifyDeploymentRisk, classifyDeploymentRun, deploymentReadiness, listDeploymentRecords, recordDeploymentState } from '../apps/cli/src/deployment-orchestrator.js';
 
 const priorDb = process.env.WOORI_AGENT_DB_PATH;
 let tempDir: string | undefined;
@@ -55,6 +55,17 @@ describe('Phase 9D merge/deploy gate', () => {
     expect(assessPostDeploymentVerification({ deploymentRun: 'success', containerHealth: 'passed', httpSmoke: 'passed', playwrightSmoke: 'passed', pageErrors: 0, seoMetadata: 'passed' }).status).toBe('Verified');
     expect(assessPostDeploymentVerification({ deploymentRun: 'failure', containerHealth: 'unknown', httpSmoke: 'not_run', playwrightSmoke: 'not_run', pageErrors: null, seoMetadata: 'not_run' }).status).toBe('Deployment Failed');
   });
+  it('requires matching runtime image identity, healthcheck, and post-deploy QA for full verification', () => {
+    const evidence = { workflowConclusion: 'success' as const, deployStepConclusion: 'success' as const, deploymentSha: sha, runtimeImageRevision: null, runtimeImageDigest: null, expectedImageDigest: 'sha256:abc', healthcheck: 'passed' as const, postDeployQa: 'not_run' as const };
+    const partial = classifyDeploymentEvidence(evidence);
+    expect(partial.workflowSucceeded).toBe(true);
+    expect(partial.deploymentConfirmed).toBe(true);
+    expect(partial.runtimeVersionConfirmed).toBe(false);
+    expect(partial.fullyVerified).toBe(false);
+    expect(partial.blockers).toContain('The running container image revision and digest are not confirmed.');
+    expect(classifyDeploymentEvidence({ ...evidence, runtimeImageRevision: sha, runtimeImageDigest: 'sha256:abc', postDeployQa: 'passed' }).status).toBe('Fully Verified');
+    expect(classifyDeploymentEvidence({ ...evidence, workflowConclusion: 'failure' }).deploymentConfirmed).toBe(false);
+  });
   it('only advertises Home guarded rollback and never enables automatic rollback', () => {
     expect(assessRollbackReadiness('home').status).toContain('Guarded workflow path exists');
     expect(assessRollbackReadiness('docs').status).toContain('Not Configured');
@@ -64,7 +75,11 @@ describe('Phase 9D merge/deploy gate', () => {
     const service = { service: 'home', repository: 'alsruddns/woori-home', workflow: 'publish.yml', job: 'deploy', deployStep: 'Deploy only the portal service' };
     const run = { databaseId: 99, workflowName: 'Publish', status: 'completed', conclusion: 'success', url: 'https://example.invalid/run/99', createdAt: '2026-10-23T00:00:00Z', updatedAt: '2026-10-23T00:01:00Z', headSha: sha, event: 'workflow_dispatch', headBranch: 'main' };
     expect(classifyDeploymentRun(service, { ...run, event: 'pull_request' }, [])).toBeNull();
-    expect(classifyDeploymentRun(service, run, [{ name: 'deploy', status: 'completed', conclusion: 'success', startedAt: run.createdAt, completedAt: run.updatedAt, steps: [{ name: service.deployStep, status: 'completed', conclusion: 'success' }] }])?.status).toBe('Deployed');
+    const deployed = classifyDeploymentRun(service, run, [{ name: 'deploy', status: 'completed', conclusion: 'success', startedAt: run.createdAt, completedAt: run.updatedAt, steps: [{ name: service.deployStep, status: 'completed', conclusion: 'success' }] }]);
+    expect(deployed?.status).toBe('Deployed');
+    expect(deployed?.evidence.runtimeVersionConfirmed).toBe(false);
+    expect(deployed?.evidence.healthcheckPassed).toBe(false);
+    expect(deployed?.evidence.fullyVerified).toBe(false);
     expect(classifyDeploymentRun(service, run, [{ name: 'deploy', status: 'completed', conclusion: 'success', startedAt: run.createdAt, completedAt: run.updatedAt, steps: [{ name: service.deployStep, status: 'completed', conclusion: 'skipped' }] }])).toBeNull();
   });
   it('keeps merges, deployment and rollback off in readiness output', () => {
@@ -74,5 +89,8 @@ describe('Phase 9D merge/deploy gate', () => {
     expect(result.automaticDeploy).toBe(false);
     expect(result.automaticRollback).toBe(false);
     expect(result.workflows).toHaveLength(5);
+    expect(result.homeSecurityPromotion.mainNext).toBe('16.4.1');
+    expect(result.homeSecurityPromotion.runtimeVersion).toContain('Unconfirmed');
+    expect(result.protectionPlan.mainBranchCi).toContain('develop');
   });
 });
