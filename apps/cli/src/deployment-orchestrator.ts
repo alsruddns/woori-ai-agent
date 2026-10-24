@@ -1,4 +1,5 @@
 import { initDb } from './core.js';
+import {linkExternalEvidenceByCommit} from './development-audit.js';
 import { spawnSync } from 'node:child_process';
 
 export type MergeDeployGateInput = {
@@ -206,6 +207,7 @@ export function refreshDeploymentRuns(runner: GhRunner = runGh) {
       if (!classified) continue;
       const expectedImageDigest = classified.status === 'Deployed' ? extractWorkflowImageDigest(runner(['run', 'view', String(run.databaseId), '--repo', service.repository, '--log']).stdout, service, run) : undefined;
       recordDeploymentState({ service: service.service, headSha: run.headSha, target: 'main', status: classified.status, runId: run.databaseId, runUrl: run.url ?? undefined, detail: classified.detail, expectedImageDigest, startedAt: classified.startedAt ?? undefined, finishedAt: classified.finishedAt ?? undefined });
+      linkExternalEvidenceByCommit(service.service,run.headSha,'DEPLOYMENT_EVIDENCE_OBSERVED',{workflow:run.workflowName,runId:run.databaseId,runUrl:run.url??null,status:classified.status,imageDigest:expectedImageDigest??null,detail:classified.detail,startedAt:classified.startedAt??null,finishedAt:classified.finishedAt??null,claim:'Recorded GitHub workflow evidence; runtime is not implied.'},'deployment-run:'+run.databaseId);
       results.push({ service: service.service, status: classified.status, runId: run.databaseId, headSha: run.headSha, expectedImageDigest, evidence: classified.evidence });
       observed = true; break;
     }
@@ -351,6 +353,7 @@ export function recordRuntimeVerification(input: RuntimeVerificationInput) {
   db.prepare(`INSERT INTO deployment_verifications(verification_id,service,expected_sha,actual_runtime_sha,expected_image_digest,actual_image_digest,image_id,revision_label,container_health,workflow_status,deployment_status,post_deploy_qa_status,verification_status,verified_at,evidence_source,failure_reason,run_id,created_at)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(verificationId,input.service,input.expectedSha,input.actualRuntimeSha??null,current.expectedImageDigest??null,input.actualImageDigest??null,input.imageId??null,input.revisionLabel??null,input.containerHealth,input.workflowStatus,input.deploymentStatus,input.postDeployQaStatus,status,verifiedAt,input.evidenceSource.trim(),input.failureReason??null,current.runId??null,verifiedAt);
   db.close();
+  linkExternalEvidenceByCommit(input.service,input.expectedSha,'RUNTIME_VERIFICATION_RECORDED',{verificationId,expectedSha:input.expectedSha,actualRuntimeSha:input.actualRuntimeSha??null,expectedImageDigest:current.expectedImageDigest??null,actualImageDigest:input.actualImageDigest??null,revisionLabel:input.revisionLabel??null,containerHealth:input.containerHealth,workflowStatus:input.workflowStatus,deploymentStatus:input.deploymentStatus,postDeployQaStatus:input.postDeployQaStatus,status,verifiedAt,evidenceSource:input.evidenceSource,failureReason:input.failureReason??null},'runtime-verification:'+verificationId);
   return { verificationId, service: input.service, expectedSha: input.expectedSha, status, stored: true };
 }
 
