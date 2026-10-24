@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createPlatformAdapter, detectCodexHome } from './platform-adapters.js';
+import { inspectLinuxRuntime } from './linux-runtime.js';
 
 export type CodexLauncher = { kind:'node'|'exe'; executable:string; prefixArgs:string[]; version:string };
 const credentialEnvNames=['OPENAI_API_KEY','CODEX_API_KEY','OPENAI_BASE_URL','OPENAI_API_BASE','CODEX_BASE_URL','ANTHROPIC_API_KEY','GEMINI_API_KEY','GOOGLE_API_KEY'];
@@ -44,6 +45,14 @@ export function safeCodexEnv(source:NodeJS.ProcessEnv=process.env,platform=proce
  const env:NodeJS.ProcessEnv={};
  const allowed=platform==='win32'?winEnvNames:['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TMPDIR','CODEX_HOME','XDG_CONFIG_HOME','TERM'];
  for(const name of allowed)if(source[name])env[name]=source[name];
+ if(platform==='linux'&&source.WOORI_LINUX_WORKER_HOME){
+  const platformPath=path.posix;
+  env.HOME=source.WOORI_LINUX_WORKER_HOME;
+  env.XDG_CONFIG_HOME=platformPath.join(source.WOORI_LINUX_WORKER_HOME,'.config');
+  const configuredCodexHome=source.CODEX_HOME;
+  const allowedCodexHome=configuredCodexHome&&configuredCodexHome.startsWith(`${source.WOORI_LINUX_WORKER_HOME.replace(/[\\/]+$/,'')}/`)?configuredCodexHome:platformPath.join(source.WOORI_LINUX_WORKER_HOME,'.codex');
+  env.CODEX_HOME=allowedCodexHome;
+ }
  env.CI='true';env.PLAYWRIGHT_WORKERS='1';env.MAX_WORKERS='1';env.COREPACK_ENABLE_NETWORK='0';env.npm_config_offline='true';
  return env;
 }
@@ -66,11 +75,21 @@ export function codexLoginStatus(cli=discoverCodexCli()):{status:'ChatGPT'|'API 
  if(/api key/i.test(output))return{status:'API Key',message:'Codex reports API-key authentication; execution is blocked.',exitCode:result.status??1};
  return{status:result.status===0?'Unknown':'Not Configured',message:'ChatGPT authentication could not be verified from the CLI status command.',exitCode:result.status??1};
 }
-export function probeMxcSandbox(cli=discoverCodexCli()):{status:'Ready'|'Not Configured';message:string;exitCode:number|null}{
+export type SandboxProbeResult={status:'Ready'|'Not Configured';message:string;exitCode:number|null;details?:unknown};
+export function probeMxcSandbox(cli=discoverCodexCli()):SandboxProbeResult{
  if(!cli||process.platform!=='win32')return{status:'Not Configured',message:'The native Windows MXC sandbox is unavailable on this platform.',exitCode:null};
  const result=runCli(cli,['-c','windows.sandbox=mxc','sandbox','--include-managed-config','--permission-profile',':workspace','--cd',process.cwd(),'--','cmd.exe','/d','/c','echo WOORI_MXC_OK'],12000);
  if(result.status===0&&result.stdout.includes('WOORI_MXC_OK'))return{status:'Ready',message:'MXC workspace sandbox probe succeeded.',exitCode:0};
  return{status:'Not Configured',message:'MXC workspace sandbox probe failed; workspace-write execution is blocked.',exitCode:result.status??1};
+}
+export function probeCodexSandbox(cli=discoverCodexCli()):SandboxProbeResult{
+ if(process.platform==='win32')return probeMxcSandbox(cli);
+ if(process.platform!=='linux')return{status:'Not Configured',message:'Codex write execution is supported only on Windows or Linux.',exitCode:null};
+ const runtime=inspectLinuxRuntime();
+ if(!runtime.runnable)return{status:'Not Configured',message:runtime.reasons.join(' '),exitCode:null,details:runtime};
+ const verifiedVersion=process.env.WOORI_LINUX_CODEX_SANDBOX_VERIFIED_VERSION;
+ if(!cli||verifiedVersion!==cli.version)return{status:'Not Configured',message:'Linux host prerequisites passed, but this exact Codex CLI version has not completed a ChatGPT-authenticated sandbox boundary test; write execution remains disabled.',exitCode:null,details:runtime};
+ return{status:'Ready',message:'Linux rootless bubblewrap, private worker home, cgroup resource limits and this Codex CLI version are verified.',exitCode:0,details:runtime};
 }
 
 export function parseAllowedPaths(input:string):string[]{
@@ -129,5 +148,10 @@ export function platformIsWindows(){return process.platform==='win32';}
 export function codexAuthFilePresent(){const home=detectCodexHome();return fs.existsSync(path.join(home,'auth.json'));}
 export function codexPlatformReadiness(){
  const adapter=createPlatformAdapter();
- return{platform:adapter.id,credentialStore:{id:adapter.credentialStore.id,status:adapter.credentialStore.status,reason:adapter.credentialStore.reason},sandbox:{id:adapter.sandbox.id,status:adapter.sandbox.status,reason:adapter.sandbox.reason},executor:{status:adapter.codexExecutor.status,reason:adapter.codexExecutor.reason},worker:adapter.workerHealth.snapshot()};
+ const sandbox=probeCodexSandbox();
+ const linuxIsolation=(sandbox.details as {userIsolation?:{status:string;reason?:string}}|undefined)?.userIsolation;
+ const credentialStore=adapter.id==='linux'
+  ?{id:'linux-posix-private-codex-home',status:linuxIsolation?.status==='Ready'?'Ready':'Not Configured',reason:linuxIsolation?.status==='Ready'?'Codex auth.json is present in the worker-owned private home; POSIX permissions protect it but do not encrypt it. ChatGPT login status is checked separately.':linuxIsolation?.status==='Blocked'?linuxIsolation.status+'; Linux Codex credentials are not considered ready.':linuxIsolation?.reason??adapter.credentialStore.reason}
+  :{id:adapter.credentialStore.id,status:adapter.credentialStore.status,reason:adapter.credentialStore.reason};
+ return{platform:adapter.id,credentialStore,sandbox:{id:adapter.sandbox.id,status:sandbox.status,reason:sandbox.message},executor:{status:sandbox.status,reason:adapter.codexExecutor.reason},linuxRuntime:adapter.id==='linux'?sandbox.details:null,worker:adapter.workerHealth.snapshot()};
 }

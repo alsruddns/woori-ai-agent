@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { linuxWorkspaceSandboxArgs, systemdLimitedCommand } from './linux-runtime.js';
 
 export type PlatformId = 'windows' | 'linux' | 'unsupported';
 export type CapabilityStatus = 'Ready' | 'Not Configured' | 'Unsupported';
@@ -23,7 +24,8 @@ export interface SandboxProvider {
 export interface ProcessRunner {
   readonly platform: PlatformId;
   readonly timeoutTermination: 'taskkill-tree' | 'process-signal';
-  terminate(pid: number): void;
+  terminate(pid: number, force?: boolean): void;
+  limitCommand(command: string, args: string[], childEnv?: NodeJS.ProcessEnv): { command: string; args: string[] };
 }
 
 export interface FileSystemAdapter {
@@ -75,7 +77,7 @@ function credentialStore(id: PlatformId): CredentialStore {
 
 function sandboxProvider(id: PlatformId): SandboxProvider {
   if (id === 'windows') return { id: 'windows-mxc', status: 'Not Configured', reason: 'MXC must pass its live Codex sandbox probe before write execution.' };
-  if (id === 'linux') return { id: 'linux-isolated-sandbox', status: 'Not Configured', reason: 'Linux sandbox implementation is deferred to Phase 10A-2; Linux code modification is fail-closed.' };
+  if (id === 'linux') return { id: 'linux-isolated-sandbox', status: 'Not Configured', reason: 'Linux sandbox primitives are implemented; readiness still requires host isolation checks and a version-bound Codex sandbox verification.' };
   return { id: 'unsupported', status: 'Unsupported', reason: 'No sandbox adapter exists for this operating system.' };
 }
 
@@ -89,9 +91,13 @@ export function createPlatformAdapter(platform = process.platform): PlatformAdap
     processRunner: {
       platform: id,
       timeoutTermination: id === 'windows' ? 'taskkill-tree' : 'process-signal',
-      terminate(pid) {
+      terminate(pid,force=false) {
         if (id === 'windows') spawnSync('taskkill.exe',['/PID',String(pid),'/T','/F'],{encoding:'utf8',windowsHide:true,timeout:5000});
-        else try { process.kill(pid,'SIGTERM'); } catch { /* Process may have exited during timeout handling. */ }
+        else try { process.kill(id==='linux'?-pid:pid,force?'SIGKILL':'SIGTERM'); } catch { /* Process may have exited during timeout handling. */ }
+      },
+      limitCommand(command,args,childEnv) {
+        if (id === 'linux') return systemdLimitedCommand(command,args,undefined,childEnv);
+        return { command, args };
       },
     },
     fileSystem: {
@@ -116,10 +122,14 @@ export function createPlatformAdapter(platform = process.platform): PlatformAdap
       sandbox,
       buildExecArgs: id === 'windows'
         ? (worktree, mode, prompt) => ['-c','windows.sandbox=mxc','exec','--ignore-user-config','--sandbox',mode,'--ephemeral','--json','--cd',worktree,prompt]
-        : () => null,
+        : id === 'linux'
+          ? (worktree, mode, prompt) => ['-c','sandbox_workspace_write.network_access=false','exec','--ignore-user-config','--sandbox',mode,'--ephemeral','--json','--cd',worktree,prompt]
+          : () => null,
       buildSandboxCommandArgs: id === 'windows'
         ? (worktree, command, args) => ['-c','windows.sandbox=mxc','sandbox','--include-managed-config','--permission-profile',':workspace','--cd',worktree,'--',command,...args]
-        : () => null,
+        : id === 'linux'
+          ? (worktree, command, args) => linuxWorkspaceSandboxArgs(worktree,command,args)
+          : () => null,
     },
   };
 }

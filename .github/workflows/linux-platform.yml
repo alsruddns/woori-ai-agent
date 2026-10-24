@@ -1,0 +1,50 @@
+name: Linux platform compatibility
+
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-platform-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-static-and-sandbox:
+    name: Ubuntu adapter and sandbox checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PAID_AI_API_ENABLED: "false"
+      AI_API_BUDGET_USD: "0"
+      AI_AUTO_EXECUTION: "false"
+      OPENAI_API_KEY: ""
+      CODEX_API_KEY: ""
+      GITHUB_TOKEN: ""
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.1
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install rootless bubblewrap prerequisite
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+      - run: pnpm install --frozen-lockfile
+      - name: TypeScript, lint, unit tests, and dashboard build
+        run: pnpm typecheck && pnpm lint && pnpm test && pnpm build
+      - name: Verify rootless bubblewrap filesystem and network boundary
+        run: >-
+          pnpm exec tsx -e 'import { probeBubblewrapSandbox } from "./apps/cli/src/linux-runtime.ts";
+          const result=probeBubblewrapSandbox();
+          console.log(JSON.stringify(result));
+          if(result.status!=="Ready") process.exit(1);'

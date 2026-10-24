@@ -44,9 +44,9 @@ describe('Codex local execution safety',()=>{
  });
 
  it('fails closed for Linux code modification until a Linux sandbox adapter is ready',async()=>{
-  setup();const taskId=makeTask();let invoked=false;
-  const result=await executeApprovedTask({taskId,approved:true,platform:'linux',allowedPaths:'src/**',runCodex:async()=>{invoked=true;return{exitCode:0,timedOut:false,stdout:'',stderr:''};}});
-  expect(result.status).toBe('Blocked');expect(result.error).toMatch(/Windows workstation only/i);expect(invoked).toBe(false);
+  const root=setup();const taskId=makeTask();let invoked=false;
+  const result=await executeApprovedTask({taskId,approved:true,platform:'linux',allowedPaths:'src/**',launcher:fakeCli(root),repositoryOverride:repository(path.join(root,'source'),{codeAutomationEnabled:true}),sandboxProbe:()=>({status:'Not Configured',message:'Linux sandbox has not been verified.',exitCode:null}),runCodex:async()=>{invoked=true;return{exitCode:0,timedOut:false,stdout:'',stderr:''};}});
+  expect(result.status).toBe('Blocked');expect(result.error).toMatch(/Linux sandbox has not been verified/i);expect(invoked).toBe(false);
  });
 
  it('blocks API-key environments before creating a worktree or invoking Codex',async()=>{
