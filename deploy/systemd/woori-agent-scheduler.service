@@ -1,0 +1,36 @@
+[Unit]
+Description=Woori AI Agent bounded read-only scheduler
+ConditionPathExists=/etc/woori-agent/scheduler.enabled
+After=network-online.target woori-agent-controller.service
+Wants=network-online.target
+Requires=woori-agent-controller.service
+StartLimitIntervalSec=10min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=woori-agent
+Group=woori-agent
+WorkingDirectory=/opt/woori-ai-agent
+EnvironmentFile=/etc/woori-agent/scheduler.env
+ExecStart=/opt/woori-ai-agent/node_modules/.bin/tsx apps/cli/src/index.ts scheduler daemon
+Restart=on-failure
+RestartSec=20s
+TimeoutStopSec=30s
+KillMode=control-group
+CPUQuota=20%
+MemoryMax=384M
+TasksMax=48
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/woori-agent
+StateDirectory=woori-agent
+UMask=0077
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

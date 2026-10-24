@@ -21,7 +21,7 @@ The dashboard is served at `http://127.0.0.1:5173`. Reports are written to `repo
 
 ## CLI
 
-Commands: `discover`, `qa`, `seo`, `content`, `competitor`, `growth`, `ux`, `performance`, `localization`, `ads`, `change`, `analytics`, `improvement`, `all`, `status`.
+Commands: `discover`, `qa`, `seo`, `content`, `competitor`, `growth`, `ux`, `performance`, `localization`, `ads`, `change`, `analytics`, `improvement`, `scheduler`, `all`, `status`.
 
 Use `pnpm agent <command> -- --service=home|calculator|tools|money|docs|quiz|all --max-pages=50`. Paid model APIs are prohibited in runtime and CI, regardless of API keys. `agent:explore` reports Not Configured without attempting network discovery or browser actions. Rule-based Codex review prompts can be generated from stored findings with `pnpm agent improvement`; the user reviews them in an interactive Codex session. Search Console, GA4, AdSense, and AI-authored content remain Not Configured without their permitted data sources.
 
@@ -57,6 +57,10 @@ Content, Growth, Improvement, and advertising-layout inspection run with local r
 ### Search Console local SEO analysis
 
 Windows users can opt in to GSC with only the `webmasters.readonly` scope, list the actual properties returned by Google, select an exact returned `siteUrl`, and run cached, request-capped reports. See [the local GSC setup guide](docs/google-free-apis.md). GSC credentials and collection never run in GitHub Actions; without local OAuth consent the result stays `Not Configured`.
+
+## Phase 10A-4 scheduler and Live Monitor
+
+The shared SQLite Controller stores hourly HTTP smoke, six-hour metadata samples, daily sitemap-backed locale/content samples, and a weekly stored-issue summary. Scheduling is globally OFF by default (`WOORI_SCHEDULER_ENABLED=false`) and requires the three zero-cost AI policy values plus a fresh Controller heartbeat. It never runs Codex, GSC collection, browser/Lighthouse jobs, PR creation, merge, deployment, or rollback. See [the Scheduler and Live Monitor guide](docs/PHASE-10A-4.md) and the [Phase 10B non-production preparation checklist](docs/PHASE-10B-PREP.md). The systemd units and Task Scheduler scripts are examples only; this repository did not install or start them.
 
 ## Codex + Playwright MCP
 

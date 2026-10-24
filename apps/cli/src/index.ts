@@ -21,6 +21,7 @@ import {createDistributedControllerServer,controllerWorkerRequest,heartbeatWorke
 import {approveControllerJob,controllerDashboardSnapshot, recoverExpiredControllerJob} from './distributed-queue.js';
 import type {ControllerWorkerInput, WorkerOs} from './distributed-queue.js';
 import os from 'node:os';
+import { initializeScheduler, initializeServiceControls, recoverScheduledRun, runOneScheduledAction, runSchedulerDaemon, schedulerSnapshot, schedulerTick, updateSchedulerServiceControl } from './scheduler.js';
 
 const args=process.argv.slice(2); const command=args[0]??'help';
 const option=(name:string,fallback:string)=>args.find(a=>a.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
@@ -34,6 +35,17 @@ const runId=new Date().toISOString().replace(/[:.]/g,'-')+'-'+randomUUID().slice
 const configured=new Set(['qa','seo','content','growth','change','localization','performance','improvement','competitor','ads']);
 async function main(){
  assertNoPaidAiApi();
+ if(command==='scheduler'){
+  const action=args[1]??'status';
+  if(action==='init'){console.log(JSON.stringify({...initializeScheduler(),serviceControls:initializeServiceControls()},null,2));return;}
+  if(action==='status'){console.log(JSON.stringify(schedulerSnapshot(),null,2));return;}
+  if(action==='tick'){console.log(JSON.stringify(schedulerTick(),null,2));return;}
+  if(action==='run-once'){if(process.env.WOORI_SCHEDULER_ENABLED!=='true')throw new Error('Scheduler is disabled. Set WOORI_SCHEDULER_ENABLED=true after reviewing the local policy.');if(process.env.WOORI_SCHEDULER_ENABLED!=='true'||process.env.PAID_AI_API_ENABLED!=='false'||process.env.AI_API_BUDGET_USD!=='0'||process.env.AI_AUTO_EXECUTION!=='false')throw new Error('Explicit zero-cost scheduler policy is required.');console.log(JSON.stringify(await runOneScheduledAction(),null,2));return;}
+  if(action==='daemon'){const controller=new AbortController();process.once('SIGINT',()=>controller.abort());process.once('SIGTERM',()=>controller.abort());console.log(JSON.stringify({status:'Starting scheduler daemon',policy:'read-only',codex:'Disabled',merge:'OFF',deployment:'OFF'}));await runSchedulerDaemon({signal:controller.signal});return;}
+  if(action==='recover'){console.log(JSON.stringify(recoverScheduledRun({runId:option('run-id',''),processTerminated:option('process-terminated','false')==='true',verifiedBy:option('verified-by',''),evidence:option('evidence','')}),null,2));return;}
+  if(action==='control'){const service=option('service',''),field=option('field',''),enabled=option('enabled','false')==='true';console.log(JSON.stringify(updateSchedulerServiceControl(service,field,enabled),null,2));return;}
+  throw new Error('Scheduler commands: init | status | tick | run-once | daemon | control --service=home|calculator|tools|docs|quiz --field=autoQa|seo|localization|improvementCandidates --enabled=true|false');
+ }
  if(command==='controller'){
   const action=args[1]??'status';
   if(action==='status'){console.log(JSON.stringify(controllerDashboardSnapshot(),null,2));return;}
@@ -112,7 +124,7 @@ async function main(){
   if(action==='run'){const taskId=option('task-id','');if(option('approve','false')!=='true'){const result=dryRunDevelopmentTask(taskId);console.log(JSON.stringify({...result,approvalRequired:'Repeat with --approve=true only after reviewing the task and passing --allow-paths=<glob,...>.'},null,2));if(!result.wouldExecute)process.exitCode=2;return;}const result=await executeApprovedTask({taskId,approved:true,allowedPaths:option('allow-paths',''),timeoutMs:Number(option('timeout-ms','600000'))});console.log(JSON.stringify(result,null,2));if(result.status!=='Completed')process.exitCode=2;return;}
   throw new Error('Development commands: status | doctor | codex | github | deployment [--refresh=true] | runtime-verify --service --expected-sha --source [--runtime-sha --revision-label --expected-digest --runtime-digest --image-id --health=passed|failed|unknown --workflow=success|failure|unknown --deployment=confirmed|failed|unknown --post-qa=passed|failed|not_run] | repositories | queue [--discover=true] | settings --service=<id> --code=on|off --pr=on|off --deploy=off | add --service --title --evidence --acceptance | transition --task-id --to | executions | prs | pr --task-id [--approve-pr=true] | ci --task-id | run --task-id [--approve=true --allow-paths=src/**,tests/**] | cleanup --task-id (clean worktree only)');
  }
- if(command==='help'){console.log(`Woori AI Agent\nCommands: discover | smoke | qa | seo | content | competitor | growth | ux | performance | localization | ads | adsense-approval | development | controller | worker | change | analytics | improvement | all | report | status\nOptions: --service=all|home|calculator|tools|money|docs|quiz --profile=daily|weekly|monthly|changed --max-pages=50\nDistributed queue: controller serve|status|approve|recover; worker status|register|heartbeat|heartbeat-loop|sync|claim|transition`);return;}
+ if(command==='help'){console.log(`Woori AI Agent\nCommands: discover | smoke | qa | seo | content | competitor | growth | ux | performance | localization | ads | adsense-approval | development | controller | worker | scheduler | change | analytics | improvement | all | report | status\nOptions: --service=all|home|calculator|tools|money|docs|quiz --profile=daily|weekly|monthly|changed --max-pages=50\nDistributed queue: controller serve|status|approve|recover; worker status|register|heartbeat|heartbeat-loop|sync|claim|transition\nScheduler: scheduler init|status|tick|run-once|daemon|control --service=... --field=...; scheduler recover --run-id=... --process-terminated=true`);return;}
  if(command==='explore'){console.error('Not Configured: no autonomous model API is permitted. Use the user-run Codex interactive session with Playwright MCP; no browser actions were attempted.');process.exitCode=2;return;}
  if(command==='status'){console.log(JSON.stringify({services:config.services.map(s=>({id:s.id,label:s.label})),agents:agents.map(a=>({id:a,status:configured.has(a)?'Ready':'Not Configured'})),aiPolicy:getAiPolicy(),paidAi:'Not Configured (prohibited)'},null,2));return;}
  if(command==='report'){const db=(await import('./core.js')).initDb();const run=db.prepare('SELECT id,mode FROM runs ORDER BY started_at DESC LIMIT 1').get() as {id:string;mode:string}|undefined;if(!run){console.log('No completed scan is available yet.');return;}const checks=db.prepare('SELECT url,service,locale,status,title,description,canonical,html_lang AS htmlLang,hreflang_count AS hreflangCount,h1_count AS h1Count,errors FROM checks WHERE run_id=?').all(run.id) as Check[];const findings=db.prepare('SELECT id,service,url,locale,agent,severity,status,title,description,evidence FROM findings WHERE run_id=?').all(run.id) as Finding[];console.log(`Report: ${writeReports(run.id,run.mode,checks.map(c=>({...c,links:[],errors:JSON.parse(String(c.errors??'[]'))})),findings)}`);db.close();return;}

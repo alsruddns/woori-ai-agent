@@ -1,0 +1,34 @@
+[Unit]
+Description=Woori AI Agent restricted Worker heartbeat
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=10min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=woori-agent-worker
+Group=woori-agent-worker
+WorkingDirectory=/opt/woori-ai-agent
+EnvironmentFile=/etc/woori-agent/worker.env
+ExecStart=/opt/woori-ai-agent/node_modules/.bin/tsx apps/cli/src/index.ts worker heartbeat-loop --interval-seconds=30
+Restart=on-failure
+RestartSec=20s
+TimeoutStopSec=20s
+KillMode=control-group
+CPUQuota=10%
+MemoryMax=256M
+TasksMax=32
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/woori-agent-worker
+StateDirectory=woori-agent-worker
+UMask=0077
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

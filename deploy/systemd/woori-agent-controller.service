@@ -1,0 +1,33 @@
+[Unit]
+Description=Woori AI Agent private Controller
+After=network.target
+StartLimitIntervalSec=10min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=woori-agent
+Group=woori-agent
+WorkingDirectory=/opt/woori-ai-agent
+EnvironmentFile=/etc/woori-agent/controller.env
+ExecStart=/opt/woori-ai-agent/node_modules/.bin/tsx apps/cli/src/index.ts controller serve
+Restart=on-failure
+RestartSec=15s
+TimeoutStopSec=20s
+KillMode=control-group
+CPUQuota=15%
+MemoryMax=256M
+TasksMax=32
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/woori-agent
+StateDirectory=woori-agent
+UMask=0077
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

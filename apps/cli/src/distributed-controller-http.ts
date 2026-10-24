@@ -10,6 +10,7 @@ import {
   renewControllerLease, submitControllerJob, transitionControllerJob, controllerJobStatuses,
 } from './distributed-queue.js';
 import type { ControllerWorkerPolicy, WorkerOs } from './distributed-queue.js';
+import { initializeScheduler, initializeServiceControls, recordControllerHeartbeat, recordWorkerHealthSnapshots, schedulerSnapshot } from './scheduler.js';
 
 const envTokens = () => {
   const raw = process.env.WOORI_CONTROLLER_WORKER_TOKENS;
@@ -85,7 +86,8 @@ export function createDistributedControllerServer(options: ControllerOptions = {
         const input = body ? JSON.parse(body) : {};
         let result: unknown;
         if (req.url === '/v1/workers/register') result = registerControllerWorker({ ...input, workerId }, dbPath, policy);
-        else if (req.url === '/v1/workers/heartbeat') result = heartbeatControllerWorker({ ...input, workerId }, dbPath, policy);
+        else if (req.url === '/v1/workers/heartbeat') { result = heartbeatControllerWorker({ ...input, workerId }, dbPath, policy); recordWorkerHealthSnapshots(dbPath); }
+        else if (req.url === '/v1/monitor/snapshot') result = schedulerSnapshot(dbPath,Number.isSafeInteger(input.afterEventId)?Math.max(0,input.afterEventId):0);
         else if (req.url === '/v1/jobs/submit') result = submitControllerJob(input, dbPath);
         else if (req.url === '/v1/jobs/status') result = controllerJobStatuses(input.jobIds, dbPath);
         else if (req.url === '/v1/jobs/claim') result = currentControllerLease(workerId, dbPath) ?? claimControllerJob(workerId, input.leaseMs, dbPath, policy);
@@ -106,7 +108,8 @@ export function createDistributedControllerServer(options: ControllerOptions = {
   const server = tlsKey && tlsCert
     ? https.createServer({ key: fs.readFileSync(tlsKey), cert: fs.readFileSync(tlsCert), minVersion: 'TLSv1.2' }, handler)
     : http.createServer(handler);
-  return { server, host, port, listen: () => new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => resolve()); }), close: () => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) };
+  const instanceId=randomUUID();let controllerHeartbeat:NodeJS.Timeout|undefined;
+  return { server, host, port, listen: () => new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => { initializeScheduler(dbPath); initializeServiceControls(dbPath); recordControllerHeartbeat('Online',instanceId,dbPath); controllerHeartbeat=setInterval(()=>{try{recordControllerHeartbeat('Online',instanceId,dbPath);recordWorkerHealthSnapshots(dbPath);}catch{/* telemetry must not stop the Controller */}},10_000);resolve(); }); }), close: () => new Promise<void>((resolve, reject) => {if(controllerHeartbeat)clearInterval(controllerHeartbeat);recordControllerHeartbeat('Offline',instanceId,dbPath);server.close(error => error ? reject(error) : resolve());}) };
 }
 
 function assertLease(input: { jobId: string; fencingToken: number }, workerId: string, dbPath?: string) {

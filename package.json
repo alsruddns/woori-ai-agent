@@ -36,7 +36,8 @@
     "typecheck": "tsc --noEmit",
     "build": "pnpm --dir apps/dashboard build",
     "agent:adsense-approval": "pnpm agent adsense-approval",
-    "agent:development": "pnpm agent development status"
+    "agent:development": "pnpm agent development status",
+    "agent:scheduler": "pnpm agent scheduler"
   },
   "dependencies": {
     "@axe-core/playwright": "^4.14.0",

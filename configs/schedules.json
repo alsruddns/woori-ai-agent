@@ -1,0 +1,12 @@
+{
+  "storage": "central Controller SQLite only; never share the database file over a network",
+  "globalOptInRequired": "WOORI_SCHEDULER_ENABLED=true",
+  "catchUp": "At most one due run per schedule; older missed slots are marked Skipped and not replayed",
+  "schedules": [
+    { "id": "hourly-http-smoke", "intervalHours": 1, "action": "http-smoke", "services": ["home", "calculator", "tools", "docs", "quiz"], "maxPages": 5, "browser": false },
+    { "id": "six-hour-seo-sample", "intervalHours": 6, "action": "seo-sample", "services": ["home", "calculator", "tools", "docs", "quiz"], "maxPages": 5, "browser": false },
+    { "id": "daily-localization-content", "intervalHours": 24, "action": "localization-content", "services": ["home", "calculator", "tools", "docs", "quiz"], "maxPages": 10, "browser": false },
+    { "id": "weekly-regression-summary", "intervalHours": 168, "action": "weekly-regression-summary", "services": ["home", "calculator", "tools", "docs", "quiz"], "maxPages": 0, "browser": false }
+  ],
+  "notIncluded": ["MoneyBook", "Codex", "GSC API collection", "GA4", "AdSense API", "Lighthouse", "Playwright", "axe-core", "unreviewed competitor collection", "PR creation", "merge", "deployment", "rollback"]
+}

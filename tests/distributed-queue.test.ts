@@ -128,6 +128,20 @@ describe('distributed Controller lease safety', () => {
   } finally { await app.close(); }
  });
 
+ it('exposes scheduler Live Monitor only to an authenticated provisioned Worker', async () => {
+  const file=setup(),token='monitor-worker-secret-with-over-32-random-characters-01';
+  const app=createDistributedControllerServer({host:'127.0.0.1',port:0,dbPath:file,workerTokens:{'worker-monitor-01':token},workerPolicies:{'worker-monitor-01':{os:'windows',allowCodeChanges:false}}});
+  await app.listen();const port=(app.server.address() as {port:number}).port,base=`http://127.0.0.1:${port}`;
+  try{
+   const registered=await request(`${base}/v1/workers/register`,token,'worker-monitor-01',crypto.randomUUID(),worker('worker-monitor-01'));
+   expect(registered.status).toBe(200);
+   const denied=await fetch(`${base}/v1/monitor/snapshot`,{method:'POST',body:'{}'});expect(denied.status).toBe(401);
+   const response=await request(`${base}/v1/monitor/snapshot`,token,'worker-monitor-01',crypto.randomUUID(),{});
+   expect(response.status).toBe(200);const payload=await response.json() as {result:{controller:{status:string};workers:Array<{workerId:string}>;schedulerEnabled:boolean;linuxCodeModification:string}};
+   expect(payload.result.controller.status).toBe('Online');expect(payload.result.workers[0]?.workerId).toBe('worker-monitor-01');expect(payload.result.schedulerEnabled).toBe(false);expect(payload.result.linuxCodeModification).toBe('Blocked');
+  }finally{await app.close();}
+ });
+
  it('uses Controller-provisioned OS and write policy instead of trusting Worker readiness claims', async () => {
   const file=setup(),token='policy-worker-test-secret-0123456789-abcdefgh';
   expect(()=>createDistributedControllerServer({host:'127.0.0.1',port:0,dbPath:file,workerPolicies:{'worker-policy-02':{os:'linux',allowCodeChanges:true}}})).toThrow(/Linux code modification cannot be provisioned/i);
