@@ -158,6 +158,19 @@ describe('distributed Controller lease safety', () => {
   }finally{await app.close();}
  });
 
+ it('rejects lease renewal and transitions after the Controller policy version changes',async()=>{
+  const file=setup(),token='policy-lease-worker-token-with-over-32-characters-01';
+  const app=createDistributedControllerServer({host:'127.0.0.1',port:0,dbPath:file,workerTokens:{'worker-lease-policy':token},workerPolicies:{'worker-lease-policy':{os:'linux',allowCodeChanges:false}}});await app.listen();const base=`http://127.0.0.1:${(app.server.address() as {port:number}).port}`;
+  try{
+   await request(`${base}/v1/workers/register`,token,'worker-lease-policy',crypto.randomUUID(),worker('worker-lease-policy','linux'));
+   const job=submitControllerJob({service:'docs',kind:'qa',workClass:'analysis',idempotencyKey:'policy-version-lease-test',title:'read-only analysis',requiredOs:'linux'},file);approveControllerJob(job.globalJobId,file);
+   const claimed=await request(`${base}/v1/jobs/claim`,token,'worker-lease-policy',crypto.randomUUID(),{policyVersion:1,leaseMs:60_000});const lease=(await claimed.json() as any).result;expect(claimed.status).toBe(200);
+   updateAgentPolicy({expectedVersion:1,actor:'integration-test',reason:'invalidate worker lease policy',patch:{mode:'BUG_FIX'}},file);
+   const renewal=await request(`${base}/v1/leases/renew`,token,'worker-lease-policy',crypto.randomUUID(),{jobId:lease.jobId,leaseId:lease.leaseId,fencingToken:lease.fencingToken,policyVersion:1,leaseMs:60_000});expect(renewal.status).toBe(409);expect(await renewal.json()).toMatchObject({error:'POLICY_VERSION_STALE:2'});
+   const transition=await request(`${base}/v1/jobs/transition`,token,'worker-lease-policy',crypto.randomUUID(),{jobId:lease.jobId,leaseId:lease.leaseId,fencingToken:lease.fencingToken,policyVersion:1,status:'Failed'});expect(transition.status).toBe(409);expect(await transition.json()).toMatchObject({error:'POLICY_VERSION_STALE:2'});
+  }finally{await app.close();}
+ });
+
  it('uses Controller-provisioned OS and write policy instead of trusting Worker readiness claims', async () => {
   const file=setup(),token='policy-worker-test-secret-0123456789-abcdefgh';
   expect(()=>createDistributedControllerServer({host:'127.0.0.1',port:0,dbPath:file,workerPolicies:{'worker-policy-02':{os:'linux',allowCodeChanges:true}}})).toThrow(/Linux code modification cannot be provisioned/i);
