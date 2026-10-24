@@ -124,13 +124,13 @@ export function secretFindings(file:string,text:string){
  if(/(?:OPENAI_API_KEY|CODEX_API_KEY)\s*[=:]\s*[^\s"']{12,}/i.test(text))findings.push(`${file}: AI API credential assignment`);
  return findings;
 }
-export function codexExecArgs(worktree:string,mode:'read-only'|'workspace-write',prompt:string){
- const args=createPlatformAdapter().codexExecutor.buildExecArgs(worktree,mode,prompt);
+export function codexExecArgs(worktree:string,mode:'read-only'|'workspace-write',prompt:string,platform=process.platform){
+ const args=createPlatformAdapter(platform).codexExecutor.buildExecArgs(worktree,mode,prompt);
  if(!args)throw new Error(`Codex execution arguments are not configured for ${process.platform}.`);
  return args;
 }
-export function codexSandboxArgs(worktree:string,command:string,args:string[]){
- const safeArgs=createPlatformAdapter().codexExecutor.buildSandboxCommandArgs(worktree,command,args);
+export function codexSandboxArgs(worktree:string,command:string,args:string[],platform=process.platform){
+ const safeArgs=createPlatformAdapter(platform).codexExecutor.buildSandboxCommandArgs(worktree,command,args);
  if(!safeArgs)throw new Error(`Sandbox command arguments are not configured for ${process.platform}.`);
  return safeArgs;
 }

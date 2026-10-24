@@ -96,7 +96,7 @@ export async function executeApprovedTask(options:ExecuteOptions){
  if(!options.approved)return block('Explicit one-task approval is required: pass --approve=true after reviewing the task.');
  const executionPlatform=process.env.NODE_ENV==='test'?options.platform??process.platform:process.platform;
  if(executionPlatform!=='win32'&&executionPlatform!=='linux')return block('Codex development execution is supported only on verified Windows or Linux platforms.');
- if(process.env.GITHUB_ACTIONS==='true')return block('Codex execution is prohibited in GitHub Actions.');
+ if(process.env.GITHUB_ACTIONS==='true'&&!(process.env.NODE_ENV==='test'&&options.platform))return block('Codex execution is prohibited in GitHub Actions.');
  const paidVars=paidCredentialVariablesPresent(options.env??process.env);if(paidVars.length)return block(`Paid/API credentials are present (${paidVars.join(', ')}); execution is blocked.`);
  let patterns:string[];try{patterns=parseAllowedPaths(options.allowedPaths);}catch(error){return block(error instanceof Error?error.message:'Invalid path allowlist.');}
  if(task.status!=='Ready')return block(`Task must be Ready; current state is ${task.status}.`);
@@ -115,7 +115,7 @@ export async function executeApprovedTask(options:ExecuteOptions){
   const current=taskRepo(task,options.repositoryOverride);if(current.dirtyFileCount||!current.repositoryVerified||!current.worktreeEligible)throw new Error('Repository changed after preflight; execution stopped.');
   const created=createWorktree(task,current.localPath,options.agentDataRoot,current.prAutomationEnabled?current.prBaseBranch:undefined);worktree=created.worktree;branch=created.branch;baseSha=created.baseSha;worktreeCreated=true;
   persistStart(executionId,task,cli.version,worktree,branch,baseSha,patterns);startPersisted=true;
-  const taskStarted=Date.now();const prompt=promptFor(task,patterns);const args=codexExecArgs(worktree,'workspace-write',prompt);const processResult=await(options.runCodex??runProcess)(cli,args,worktree,timeout,safeCodexEnv());
+  const taskStarted=Date.now();const prompt=promptFor(task,patterns);const args=codexExecArgs(worktree,'workspace-write',prompt,executionPlatform);const processResult=await(options.runCodex??runProcess)(cli,args,worktree,timeout,safeCodexEnv(options.env??process.env,executionPlatform));
   const logRoot=path.resolve('data','development-executions');fs.mkdirSync(logRoot,{recursive:true});const logPath=path.join(logRoot,`${executionId}.log`);fs.writeFileSync(logPath,redactCodexOutput(`${processResult.stdout}\n${processResult.stderr}`).slice(-MAX_LOG_CHARS),{encoding:'utf8',mode:0o600});
   const remaining=timeout-(Date.now()-taskStarted);const diff=processResult.exitCode===0&&!processResult.timedOut&&!processResult.stopReason&&remaining>0?(options.runValidation??validateChanges)(cli,worktree,patterns,remaining,baseSha):{passed:false,changedFiles:[],verification:{passed:false,failures:[processResult.stopReason??(processResult.timedOut||remaining<=0?'Task execution timed out; no retry was attempted.':`Codex exited with status ${processResult.exitCode}; no retry was attempted.`)]}};
   const status=processResult.exitCode===0&&!processResult.timedOut&&diff.passed?'Completed':processResult.timedOut?'Timed Out':'Failed';

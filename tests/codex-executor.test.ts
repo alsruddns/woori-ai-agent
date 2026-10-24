@@ -24,8 +24,10 @@ describe('Codex local execution safety',()=>{
   expect(()=>parseAllowedPaths('**')).toThrow(/overly broad/i);
   expect(()=>parseAllowedPaths('../outside/**')).toThrow(/unsafe/i);
   expect(()=>parseAllowedPaths('.github/workflows/**')).toThrow(/protected/i);
-  const args=codexExecArgs('C:/tmp/worktree','workspace-write','fixture task');
+  const args=codexExecArgs('C:/tmp/worktree','workspace-write','fixture task','win32');
   expect(args).toContain('workspace-write');expect(args).toContain('--ignore-user-config');expect(args).toContain('--ephemeral');expect(args.join(' ')).toContain('windows.sandbox=mxc');expect(args.join(' ')).not.toContain('danger-full-access');
+  const linuxArgs=codexExecArgs('/tmp/worktree','workspace-write','fixture task','linux');
+  expect(linuxArgs).toContain('workspace-write');expect(linuxArgs.join(' ')).toContain('sandbox_workspace_write.network_access=false');expect(linuxArgs.join(' ')).not.toContain('windows.sandbox=mxc');
   expect(safeCodexEnv().OPENAI_API_KEY).toBeUndefined();expect(safeCodexEnv().CODEX_API_KEY).toBeUndefined();expect(safeCodexEnv().COREPACK_ENABLE_NETWORK).toBe('0');expect(safeCodexEnv().PLAYWRIGHT_WORKERS).toBe('1');
  });
 
