@@ -5,6 +5,21 @@ import Database from 'better-sqlite3';
 
 export type SqliteIntegrity = { ok: boolean; messages: string[]; bytes: number; sha256: string };
 
+export function recordSqliteMaintenanceFailure(controllerDatabase: string, action: 'backup'|'restore'|'prune'): boolean {
+  try {
+    const file=path.resolve(controllerDatabase);
+    if(!fs.existsSync(file))return false;
+    const db=new Database(file,{timeout:1000});
+    try {
+      db.exec("CREATE TABLE IF NOT EXISTS operator_notifications(id INTEGER PRIMARY KEY AUTOINCREMENT,notification_key TEXT NOT NULL UNIQUE,severity TEXT NOT NULL,source TEXT NOT NULL,title TEXT NOT NULL,detail TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'Open',created_at TEXT NOT NULL,updated_at TEXT NOT NULL)");
+      const now=new Date().toISOString();
+      db.prepare("INSERT INTO operator_notifications(notification_key,severity,source,title,detail,status,created_at,updated_at) VALUES(?,'High','storage','SQLite maintenance failed',?,'Open',?,?) ON CONFLICT(notification_key) DO UPDATE SET detail=excluded.detail,status='Open',updated_at=excluded.updated_at")
+        .run(`sqlite-maintenance:${action}`,`The ${action} operation failed. Review the dedicated systemd journal; sensitive paths and error contents were omitted.`,now,now);
+      return true;
+    } finally {db.close();}
+  } catch {return false;}
+}
+
 function ensureParent(directory: string): void {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (process.platform !== 'win32') fs.chmodSync(directory, 0o700);

@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createSqliteBackup, pruneSqliteBackups, restoreSqliteBackup, verifySqliteBackup } from '../apps/cli/src/sqlite-maintenance.js';
+import { createSqliteBackup, pruneSqliteBackups, recordSqliteMaintenanceFailure, restoreSqliteBackup, verifySqliteBackup } from '../apps/cli/src/sqlite-maintenance.js';
 
 const roots: string[] = [];
 function sandbox(){const root=fs.mkdtempSync(path.join(os.tmpdir(),'woori-db-test-'));roots.push(root);return root;}
@@ -32,5 +32,11 @@ describe('SQLite maintenance',()=>{
   const root=sandbox();for(const name of ['woori-agent-2026-10-20T10-00-00-000Z.sqlite','woori-agent-2026-10-21T10-00-00-000Z.sqlite','keep-me.sqlite'])fs.writeFileSync(path.join(root,name),'snapshot');
   const preview=pruneSqliteBackups({directory:root,keepCount:1,apply:false});expect(preview.candidates).toHaveLength(1);expect(preview.removed).toEqual([]);expect(fs.existsSync(preview.candidates[0]!)).toBe(true);
   const applied=pruneSqliteBackups({directory:root,keepCount:1,apply:true});expect(applied.removed).toHaveLength(1);expect(fs.existsSync(path.join(root,'keep-me.sqlite'))).toBe(true);
+ });
+ it('records backup failure for the live dashboard without writing sensitive paths',()=>{
+  const root=sandbox(),controller=path.join(root,'controller.sqlite'),db=new Database(controller);db.exec('CREATE TABLE operator_notifications(id INTEGER PRIMARY KEY,notification_key TEXT UNIQUE,severity TEXT,source TEXT,title TEXT,detail TEXT,status TEXT,created_at TEXT,updated_at TEXT)');db.close();
+  expect(recordSqliteMaintenanceFailure(controller,'backup')).toBe(true);
+  const verify=new Database(controller,{readonly:true});const row=verify.prepare('SELECT source,title,detail,status FROM operator_notifications').get() as Record<string,string>;verify.close();
+  expect(row).toMatchObject({source:'storage',title:'SQLite maintenance failed',status:'Open'});expect(row.detail).not.toContain(root);
  });
 });

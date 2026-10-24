@@ -49,7 +49,7 @@ Units included:
 - `woori-agent-scheduler.service` (requires the explicit opt-in marker and environment value)
 - `woori-agent-backup.service` and `.timer` (timer disabled by default)
 
-The backup timer, when explicitly enabled, uses SQLite's online backup API for Controller and analysis databases, verifies integrity, then retains at most 14 recognized snapshots and removes snapshots older than 90 days. Backups are mode `0600`. Restore verifies the snapshot and will only create a new destination; it will not overwrite a database. To restore a live database later, an operator must stop the relevant agent units and deliberately move the old database aside before restoring to the now-absent path.
+The backup timer, when explicitly enabled, uses SQLite's online backup API for Controller and analysis databases, verifies integrity, then retains at most 14 recognized snapshots and removes snapshots older than 90 days. Backups are mode `0600`. Backup/restore/prune failures create a bounded Dashboard operator notification when the Controller database is writable, and the unit failure remains visible in journald. Restore verifies the snapshot and will only create a new destination; it will not overwrite a database. To restore a live database later, an operator must stop the relevant agent units and deliberately move the old database aside before restoring to the now-absent path.
 
 ## Dry-run-first operations
 

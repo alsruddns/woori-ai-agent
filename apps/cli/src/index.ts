@@ -22,7 +22,7 @@ import {approveControllerJob,controllerDashboardSnapshot, recoverExpiredControll
 import type {ControllerWorkerInput, WorkerOs} from './distributed-queue.js';
 import os from 'node:os';
 import { initializeScheduler, initializeServiceControls, recoverScheduledRun, runOneScheduledAction, runSchedulerDaemon, schedulerSnapshot, schedulerTick, updateSchedulerServiceControl } from './scheduler.js';
-import { createSqliteBackup, pruneSqliteBackups, restoreSqliteBackup, verifySqliteBackup } from './sqlite-maintenance.js';
+import { createSqliteBackup, pruneSqliteBackups, recordSqliteMaintenanceFailure, restoreSqliteBackup, verifySqliteBackup } from './sqlite-maintenance.js';
 import { decideLinuxReadOnlyWork, linuxResourcePolicy, sampleLinuxResources } from './linux-resource-guard.js';
 
 const args=process.argv.slice(2); const command=args[0]??'help';
@@ -51,7 +51,8 @@ async function main(){
    const stamp=new Date().toISOString().replace(/[:.]/g,'-');
    const destination=path.resolve(option('destination',path.join(backupDir,`woori-agent-${stamp}.sqlite`)));
    if(!apply){console.log(JSON.stringify({status:'Dry-run',action,source,destination,method:'SQLite online backup API',willWrite:false}));return;}
-   console.log(JSON.stringify({status:'Completed',action,...await createSqliteBackup({source,destination})},null,2));return;
+   try{console.log(JSON.stringify({status:'Completed',action,...await createSqliteBackup({source,destination})},null,2));}
+   catch(error){recordSqliteMaintenanceFailure(path.resolve(process.env.WOORI_CONTROLLER_DB_PATH??'data/controller/queue.sqlite'),'backup');throw error;}return;
   }
   if(action==='verify'){
    const file=path.resolve(option('backup',option('source',source)));console.log(JSON.stringify({status:'Verified',file,...verifySqliteBackup(file)},null,2));return;
@@ -62,12 +63,14 @@ async function main(){
    const destination=path.resolve(option('destination',''));
    if(!destination||destination===path.resolve('.'))throw new Error('Specify a new --destination path; existing databases are never overwritten.');
    if(!apply){console.log(JSON.stringify({status:'Dry-run',action,backup,destination,willWrite:false,overwrite:'forbidden'}));return;}
-   console.log(JSON.stringify({status:'Restored',action,...restoreSqliteBackup({backup,destination})},null,2));return;
+   try{console.log(JSON.stringify({status:'Restored',action,...restoreSqliteBackup({backup,destination})},null,2));}
+   catch(error){recordSqliteMaintenanceFailure(path.resolve(process.env.WOORI_CONTROLLER_DB_PATH??'data/controller/queue.sqlite'),'restore');throw error;}return;
   }
   if(action==='prune'){
    const keepCount=Number(option('keep-count','14')),olderDays=Number(option('older-days','90'));
    const result=pruneSqliteBackups({directory:backupDir,keepCount,olderThanMs:olderDays*86400000,apply});
-   console.log(JSON.stringify({status:apply?'Pruned':'Dry-run',action,directory:backupDir,...result},null,2));return;
+   try{console.log(JSON.stringify({status:apply?'Pruned':'Dry-run',action,directory:backupDir,...result},null,2));}
+   catch(error){recordSqliteMaintenanceFailure(path.resolve(process.env.WOORI_CONTROLLER_DB_PATH??'data/controller/queue.sqlite'),'prune');throw error;}return;
   }
   throw new Error('DB commands: backup [--source=...] [--destination=...] [--apply=true] | verify --backup=... | restore --backup=... --destination=<new path> [--apply=true] | prune [--directory=...] [--keep-count=14 --older-days=90 --apply=true]');
  }
