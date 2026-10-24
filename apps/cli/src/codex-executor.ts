@@ -96,7 +96,7 @@ export async function executeApprovedTask(options:ExecuteOptions){
  if(!options.approved)return block('Explicit one-task approval is required: pass --approve=true after reviewing the task.');
  const executionPlatform=process.env.NODE_ENV==='test'?options.platform??process.platform:process.platform;
  if(executionPlatform!=='win32'&&executionPlatform!=='linux')return block('Codex development execution is supported only on verified Windows or Linux platforms.');
- if(process.env.GITHUB_ACTIONS==='true'&&!(process.env.NODE_ENV==='test'&&options.platform&&options.runCodex))return block('Codex execution is prohibited in GitHub Actions.');
+ if(process.env.GITHUB_ACTIONS==='true'&&!(process.env.WOORI_ALLOW_SYNTHETIC_TEST_EXECUTION==='true'&&options.platform&&options.runCodex))return block('Codex execution is prohibited in GitHub Actions.');
  const paidVars=paidCredentialVariablesPresent(options.env??process.env);if(paidVars.length)return block(`Paid/API credentials are present (${paidVars.join(', ')}); execution is blocked.`);
  let patterns:string[];try{patterns=parseAllowedPaths(options.allowedPaths);}catch(error){return block(error instanceof Error?error.message:'Invalid path allowlist.');}
  if(task.status!=='Ready')return block(`Task must be Ready; current state is ${task.status}.`);
