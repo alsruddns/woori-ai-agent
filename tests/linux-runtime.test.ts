@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import path from 'node:path';
-import { inspectLinuxRuntime, linuxAvailableMemoryBytes, linuxOverloadReason, linuxWorkerLimits, systemdLimitedCommand, linuxWorkspaceSandboxArgs } from '../apps/cli/src/linux-runtime.js';
+import { diagnoseLinuxHost, inspectLinuxRuntime, linuxAvailableMemoryBytes, linuxOverloadReason, linuxWorkerLimits, systemdLimitedCommand, linuxWorkspaceSandboxArgs } from '../apps/cli/src/linux-runtime.js';
 
 describe('Linux worker runtime safety',()=>{
  it('caps resource settings at the requested one CPU and 768 MiB ceiling',()=>{
@@ -33,6 +33,19 @@ describe('Linux worker runtime safety',()=>{
   const args=linuxWorkspaceSandboxArgs('/tmp/job','pnpm',['test']);
   expect(args).toContain('--unshare-net');expect(args).toContain('--bind');expect(args).toContain(path.resolve('/tmp/job'));expect(args).toContain('/workspace');expect(args).toContain('/nonexistent');
   expect(args.join(' ')).not.toContain('windows.sandbox=mxc');
+ });
+
+ it('reports Linux diagnostics without enabling code changes on unsupported hosts',()=>{
+  const result=diagnoseLinuxHost({platform:'win32',uid:1000});
+  expect(result.platform).toBe('win32');expect(result.codeModificationEnabled).toBe(false);
+  expect(result.codexCli.status).toBe('Not Configured');expect(result.sandboxBoundary.status).toBe('Not Configured');
+  expect(result.note).toMatch(/remains disabled/i);
+ });
+
+ it('keeps Linux code modification disabled even when diagnostic probes pass',()=>{
+  const result=diagnoseLinuxHost({platform:'linux',uid:1000,codexPath:null,probeBoundary:()=>({status:'Ready',reason:'fixture boundary passed'}),probeResources:()=>({status:'Ready',reason:'fixture cgroup passed'})});
+  expect(result.codeModificationEnabled).toBe(false);expect(result.sandboxBoundary.status).toBe('Ready');
+  expect(result.codexSandbox.status).toBe('Not Configured');expect(result.codexCli.status).toBe('Not Configured');
  });
 
  it('passes only allowlisted child variables through a resource-limited systemd scope',()=>{

@@ -16,6 +16,7 @@ import {developmentEnvironment,discoverDevelopmentTasks,dryRunDevelopmentTask,en
 import {cleanupDevelopmentWorktree,codexReadiness,executeApprovedTask,listDevelopmentExecutions} from './codex-executor.js';
 import {createDraftPullRequest,githubConnectionStatus,listDevelopmentPullRequests,refreshPullRequestChecks} from './github-pr.js';
 import {deploymentReadiness,refreshDeploymentRuns,recordRuntimeVerification} from './deployment-orchestrator.js';
+import {diagnoseLinuxHost} from './linux-runtime.js';
 
 const args=process.argv.slice(2); const command=args[0]??'help';
 const option=(name:string,fallback:string)=>args.find(a=>a.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
@@ -39,6 +40,7 @@ async function main(){
  if(command==='development'){
   const action=args[1]??'status';
   if(action==='status'||action==='doctor'){console.log(JSON.stringify(developmentEnvironment(),null,2));return;}
+  if(action==='linux-diagnostics'){const result=diagnoseLinuxHost();console.log(JSON.stringify(result,null,2));if(result.platform==='linux'&&(result.sandboxBoundary.status!=='Ready'||result.systemdLimits.status!=='Ready'))process.exitCode=2;return;}
   if(action==='codex'){const result=codexReadiness();console.log(JSON.stringify(result,null,2));if(!result.executionReady)process.exitCode=2;return;}
   if(action==='github'){const result=githubConnectionStatus();console.log(JSON.stringify(result,null,2));if(result.status!=='Connected')process.exitCode=2;return;}
   if(action==='deployment'){const refresh=option('refresh','false')==='true'?refreshDeploymentRuns():undefined;console.log(JSON.stringify({...deploymentReadiness(),...(refresh?{refresh}: {})},null,2));return;}

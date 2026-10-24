@@ -17,6 +17,25 @@ export type LinuxRuntimeReadiness = {
   reasons: string[];
 };
 
+export type LinuxSandboxDiagnostics = {
+  checkedAt: string;
+  platform: string;
+  os: string | null;
+  kernel: string | null;
+  uid: number | null;
+  codexCli: LinuxRuntimeCheck & { version?: string };
+  bubblewrapCli: LinuxRuntimeCheck & { path?: string; version?: string };
+  userNamespace: LinuxRuntimeCheck;
+  networkNamespace: LinuxRuntimeCheck;
+  appArmor: { enabled: boolean | null; restrictUnprivilegedUserns: boolean | null; bwrapProfiles: string[]; status: string };
+  systemdLimits: LinuxRuntimeCheck;
+  processSecurity: { noNewPrivileges: boolean | null; seccompMode: number | null };
+  sandboxBoundary: LinuxRuntimeCheck;
+  codexSandbox: LinuxRuntimeCheck;
+  codeModificationEnabled: false;
+  note: string;
+};
+
 const DEFAULT_MEMORY_MAX_MIB = 768;
 const MIN_FREE_MEMORY_MARGIN_MIB = 1024;
 const RESOURCE_TEST_TIMEOUT_MS = 8_000;
@@ -91,6 +110,85 @@ function findExecutable(name: string) {
   return result.status === 0 ? result.stdout.trim().split(/\r?\n/)[0] || null : null;
 }
 
+function boundedProbe(command: string, args: string[] = [], timeout = RESOURCE_TEST_TIMEOUT_MS) {
+  const result = spawnSync(command, args, { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' } });
+  return { status: result.status, stdout: (result.stdout ?? '').trim(), stderr: (result.stderr ?? '').replace(/\s+/g, ' ').trim().slice(0, 240), error: result.error?.message };
+}
+
+function readOptional(file: string) {
+  try { return fs.readFileSync(file, 'utf8').trim(); } catch { return null; }
+}
+
+function commandCheck(command: string, args: string[], passed: string, failed: string): LinuxRuntimeCheck {
+  const result = boundedProbe(command, args);
+  return result.status === 0 ? { status: 'Ready', reason: passed } : { status: 'Not Configured', reason: `${failed}${result.stderr ? `: ${result.stderr}` : result.error ? `: ${result.error}` : ''}` };
+}
+
+/** Read-only host diagnostics. Probes use only temporary files/namespaces and never relax host policy. */
+export function diagnoseLinuxHost(options: { platform?: string; uid?: number | null; codexPath?: string | null; probeBoundary?: () => LinuxRuntimeCheck; probeResources?: (limits: ReturnType<typeof linuxWorkerLimits>) => LinuxRuntimeCheck } = {}): LinuxSandboxDiagnostics {
+  const platform = options.platform ?? process.platform;
+  const uid = options.uid === undefined ? process.getuid?.() ?? null : options.uid;
+  if (platform !== 'linux') {
+    const unavailable = { status: 'Not Configured' as const, reason: 'Linux host diagnostics run only on Linux.' };
+    return { checkedAt: new Date().toISOString(), platform, os: null, kernel: null, uid, codexCli: unavailable, bubblewrapCli: unavailable, userNamespace: unavailable, networkNamespace: unavailable, appArmor: { enabled: null, restrictUnprivilegedUserns: null, bwrapProfiles: [], status: 'Not Configured outside Linux.' }, systemdLimits: unavailable, processSecurity: { noNewPrivileges: null, seccompMode: null }, sandboxBoundary: unavailable, codexSandbox: unavailable, codeModificationEnabled: false, note: 'Linux write execution remains disabled until the complete sandbox/authentication boundary is separately verified.' };
+  }
+
+  const release = readOptional('/etc/os-release');
+  const osName = release?.match(/^PRETTY_NAME="?([^"\n]+)"?/m)?.[1] ?? null;
+  const kernelResult = boundedProbe('uname', ['-r']);
+  const kernel = kernelResult.status === 0 ? kernelResult.stdout : null;
+  const codexPath = options.codexPath === undefined ? findExecutable('codex') : options.codexPath;
+  const codexVersion = codexPath ? boundedProbe(codexPath, ['--version'], 4_000) : null;
+  const codexCli: LinuxSandboxDiagnostics['codexCli'] = codexPath && codexVersion?.status === 0
+    ? { status: 'Ready', reason: 'Codex CLI version command succeeded; this does not confirm authentication or authorize a model request.', version: codexVersion.stdout.slice(0, 80) }
+    : { status: 'Not Configured', reason: 'Codex CLI is not installed or its version could not be read; no AI request was attempted.' };
+
+  const bwrapPath = findExecutable('bwrap');
+  const bwrapVersion = bwrapPath ? boundedProbe(bwrapPath, ['--version'], 2_000) : null;
+  const bubblewrapCli: LinuxSandboxDiagnostics['bubblewrapCli'] = bwrapPath && bwrapVersion?.status === 0
+    ? { status: 'Ready', reason: 'Bubblewrap executable and version were detected.', path: bwrapPath, version: bwrapVersion.stdout.slice(0, 80) }
+    : { status: 'Not Configured', reason: 'Bubblewrap was not found or its version command failed.' };
+
+  const unsharePath = findExecutable('unshare');
+  const truePath = fs.existsSync('/usr/bin/true') ? '/usr/bin/true' : '/bin/true';
+  const userNamespace = uid === 0
+    ? { status: 'Blocked' as const, reason: 'Worker UID is root; rootless execution is mandatory.' }
+    : unsharePath ? commandCheck(unsharePath, ['--user', '--map-root-user', truePath], 'Rootless user namespace probe passed.', 'Rootless user namespace probe was denied')
+      : { status: 'Not Configured' as const, reason: 'The unshare utility is unavailable.' };
+  const networkNamespace = uid === 0
+    ? { status: 'Blocked' as const, reason: 'Worker UID is root; rootless execution is mandatory.' }
+    : unsharePath ? commandCheck(unsharePath, ['--user', '--map-root-user', '--net', truePath], 'Rootless network namespace creation passed; this alone does not prove loopback setup or Codex isolation.', 'Rootless network namespace probe was denied')
+      : { status: 'Not Configured' as const, reason: 'The unshare utility is unavailable.' };
+
+  const appArmorEnabledRaw = readOptional('/sys/module/apparmor/parameters/enabled');
+  const appArmorRestrictionRaw = readOptional('/proc/sys/kernel/apparmor_restrict_unprivileged_userns');
+  const profilesRaw = readOptional('/sys/kernel/security/apparmor/profiles');
+  const appArmor: LinuxSandboxDiagnostics['appArmor'] = {
+    enabled: appArmorEnabledRaw === null ? null : /^Y/i.test(appArmorEnabledRaw),
+    restrictUnprivilegedUserns: appArmorRestrictionRaw === null ? null : appArmorRestrictionRaw === '1',
+    bwrapProfiles: profilesRaw?.split(/\r?\n/).filter(line => /bubblewrap|bwrap/i.test(line)).map(line => line.slice(0, 180)) ?? [],
+    status: appArmorEnabledRaw === null ? 'AppArmor state is not readable on this host.' : `AppArmor ${/^Y/i.test(appArmorEnabledRaw) ? 'enabled' : 'disabled'}; userns restriction ${appArmorRestrictionRaw ?? 'not exposed'}; matching profile entries ${profilesRaw === null ? 'not readable' : 'listed'}.`,
+  };
+  const procStatus = readOptional('/proc/self/status');
+  const noNewPrivilegesValue = procStatus?.match(/^NoNewPrivs:\s+(\d+)/m)?.[1];
+  const seccompValue = procStatus?.match(/^Seccomp:\s+(\d+)/m)?.[1];
+  const processSecurity = { noNewPrivileges: noNewPrivilegesValue === undefined ? null : noNewPrivilegesValue === '1', seccompMode: seccompValue === undefined ? null : Number(seccompValue) };
+
+  const limits = linuxWorkerLimits();
+  const systemdLimits = (options.probeResources ?? probeSystemdLimits)(limits);
+  const sandboxBoundary = (options.probeBoundary ?? (() => probeBubblewrapSandbox({ platform, uid })))();
+  const codexSandbox = codexPath
+    ? commandCheck(codexPath, ['sandbox', 'linux', truePath], 'Official Codex Linux command sandbox executed successfully; no model request was made.', 'Official Codex Linux sandbox command failed')
+    : { status: 'Not Configured' as const, reason: 'Codex CLI is unavailable; official Codex sandbox probe was not run.' };
+
+  return {
+    checkedAt: new Date().toISOString(), platform, os: osName, kernel, uid, codexCli, bubblewrapCli,
+    userNamespace, networkNamespace, appArmor, systemdLimits, processSecurity, sandboxBoundary, codexSandbox,
+    codeModificationEnabled: false,
+    note: 'Diagnostics never change sysctl, AppArmor, seccomp, or host namespace settings. Linux code modification remains disabled; ChatGPT login and an isolated write-boundary test are not inferred from these probes.',
+  };
+}
+
 export function probeBubblewrapSandbox(options: { platform?: string; uid?: number | null; env?: NodeJS.ProcessEnv; tempRoot?: string } = {}): LinuxRuntimeCheck {
   const platform = options.platform ?? process.platform;
   if (platform !== 'linux') return { status: 'Not Configured', reason: 'Linux sandbox probe runs only on Linux.' };
@@ -110,11 +208,11 @@ export function probeBubblewrapSandbox(options: { platform?: string; uid?: numbe
       if (fs.existsSync(systemPath)) args.push('--ro-bind-try', systemPath, systemPath);
     }
     args.push('--proc','/proc','--dev','/dev','--tmpfs','/tmp','--dir','/workspace','--bind',workspace,'/workspace','--chdir','/workspace','--','/usr/bin/sh','-eu','-c',
-      'printf isolated > /workspace/write-check; test ! -e "$1"; test ! -e /home; test ! -w /usr; printf WOORI_BWRAP_OK',
+      'printf isolated > /workspace/write-check; test ! -e "$1"; test ! -e /home; test ! -w /usr; test ! -s /proc/net/route; test "$(awk \'NR > 2 { n++ } END { print n+0 }\' /proc/net/dev)" -le 1; printf WOORI_BWRAP_OK',
       'woori-probe', outsideSecret);
     const result = spawnSync(bwrap, args, { encoding: 'utf8', timeout: RESOURCE_TEST_TIMEOUT_MS, stdio: ['ignore','pipe','pipe'] });
     if (result.status === 0 && result.stdout.includes('WOORI_BWRAP_OK') && fs.existsSync(path.join(workspace, 'write-check'))) {
-      return { status: 'Ready', reason: 'Rootless bubblewrap probe passed: workspace write works; host-only path, host home, and system writes are inaccessible; network namespace creation succeeded.' };
+      return { status: 'Ready', reason: 'Rootless bubblewrap probe passed: workspace write works; host-only path, host home, and system writes are inaccessible; only loopback is present and no network route is exposed.' };
     }
     const diagnostic = (result.stderr || result.error?.message || '').replace(/\s+/g, ' ').slice(0, 240);
     return { status: 'Not Configured', reason: `bubblewrap isolation probe failed (exit ${result.status ?? 'unknown'}) or user namespaces are restricted; Linux code execution remains disabled.${diagnostic ? ` Runner diagnostic: ${diagnostic}` : ''}` };
@@ -125,7 +223,7 @@ export function probeBubblewrapSandbox(options: { platform?: string; uid?: numbe
   }
 }
 
-function probeSystemdLimits(limits: ReturnType<typeof linuxWorkerLimits>): LinuxRuntimeCheck {
+export function probeSystemdLimits(limits: ReturnType<typeof linuxWorkerLimits> = linuxWorkerLimits()): LinuxRuntimeCheck {
   const systemdRun = findExecutable('systemd-run');
   const trueBin = fs.existsSync('/usr/bin/true') ? '/usr/bin/true' : '/bin/true';
   if (!systemdRun || !fs.existsSync(trueBin)) return { status: 'Not Configured', reason: 'systemd-run --user and a minimal probe executable are required for enforceable CPU/memory caps.' };

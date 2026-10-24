@@ -42,6 +42,12 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: TypeScript, lint, unit tests, and dashboard build
         run: pnpm typecheck && pnpm lint && WOORI_ALLOW_SYNTHETIC_TEST_EXECUTION=true pnpm test && pnpm build
+      - name: Record Linux host, namespace, AppArmor, systemd, and Codex sandbox diagnostics
+        run: >-
+          pnpm exec tsx -e 'import { diagnoseLinuxHost } from "./apps/cli/src/linux-runtime.ts";
+          const result=diagnoseLinuxHost();
+          console.log(JSON.stringify(result,null,2));
+          if(result.sandboxBoundary.status!=="Ready" || result.systemdLimits.status!=="Ready") console.log("::warning::Linux host sandbox or cgroup prerequisites are not verified; Linux code modification remains disabled.");'
       - name: Probe rootless bubblewrap filesystem and network boundary
         run: >-
           pnpm exec tsx -e 'import { probeBubblewrapSandbox } from "./apps/cli/src/linux-runtime.ts";
