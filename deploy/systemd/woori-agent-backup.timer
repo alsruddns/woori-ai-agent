@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Woori AI Agent SQLite backup (disabled until explicitly enabled)
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15m
+Unit=woori-agent-backup.service
+
+[Install]
+WantedBy=timers.target

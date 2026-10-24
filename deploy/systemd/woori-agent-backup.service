@@ -1,0 +1,29 @@
+[Unit]
+Description=Woori AI Agent consistent SQLite backup and retention
+After=woori-agent-controller.service
+Requires=woori-agent-controller.service
+
+[Service]
+Type=oneshot
+User=woori-agent
+Group=woori-agent
+Slice=woori-agent-controller.slice
+WorkingDirectory=/opt/woori-ai-agent/current
+EnvironmentFile=/etc/woori-ai-agent/scheduler.env
+ExecStartPre=/usr/bin/install -d -m 0700 /var/lib/woori-ai-agent/backups
+ExecStartPre=/opt/woori-ai-agent/current/node_modules/.bin/tsx /opt/woori-ai-agent/current/apps/cli/src/index.ts linux-preflight
+ExecStart=/opt/woori-ai-agent/current/node_modules/.bin/tsx apps/cli/src/index.ts db backup --source=/var/lib/woori-ai-agent/controller/queue.sqlite --directory=/var/lib/woori-ai-agent/backups --apply=true
+ExecStart=/opt/woori-ai-agent/current/node_modules/.bin/tsx apps/cli/src/index.ts db backup --source=/var/lib/woori-ai-agent/agent.sqlite --directory=/var/lib/woori-ai-agent/backups --apply=true
+ExecStartPost=/opt/woori-ai-agent/current/node_modules/.bin/tsx apps/cli/src/index.ts db prune --directory=/var/lib/woori-ai-agent/backups --keep-count=14 --older-days=90 --apply=true
+TimeoutStartSec=5min
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/woori-ai-agent
+StateDirectory=woori-ai-agent
+UMask=0077
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX

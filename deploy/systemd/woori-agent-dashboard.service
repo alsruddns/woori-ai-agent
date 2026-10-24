@@ -1,0 +1,36 @@
+[Unit]
+Description=Woori AI Agent localhost-only Dashboard API
+After=network.target woori-agent-controller.service
+Requires=woori-agent-controller.service
+StartLimitIntervalSec=10min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=woori-agent
+Group=woori-agent
+Slice=woori-agent-controller.slice
+WorkingDirectory=/opt/woori-ai-agent/current
+EnvironmentFile=/etc/woori-ai-agent/dashboard.env
+ExecStart=/opt/woori-ai-agent/current/node_modules/.bin/tsx apps/cli/src/server.ts
+Restart=on-failure
+RestartSec=15s
+TimeoutStopSec=20s
+KillMode=control-group
+TasksMax=48
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/woori-ai-agent /var/log/woori-ai-agent
+StateDirectory=woori-ai-agent
+StateDirectoryMode=0700
+LogsDirectory=woori-ai-agent
+LogsDirectoryMode=0700
+UMask=0077
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

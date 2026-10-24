@@ -1,0 +1,10 @@
+[Unit]
+Description=Woori AI Agent read-only Worker resource budget
+
+[Slice]
+CPUAccounting=true
+CPUQuota=50%
+MemoryAccounting=true
+MemoryHigh=224M
+MemoryMax=256M
+TasksMax=48

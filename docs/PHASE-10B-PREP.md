@@ -1,5 +1,7 @@
 # Phase 10B deployment preparation (not executed)
 
+> Deployment scripts, current directory names, resource slices, and backup/restore behavior are documented in [PHASE-10B-1.md](./PHASE-10B-1.md). This earlier checklist is historical; follow Phase 10B-1 for any separately approved rehearsal.
+
 This is a preparation checklist for a separately approved, non-production rehearsal first. It does not authorize production installation. No VPS login, unit installation, `systemctl enable/start`, container operation, database access, or service deployment occurred in Phase 10A-4.
 
 ## Accounts and filesystem layout

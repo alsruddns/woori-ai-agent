@@ -18,7 +18,7 @@ jobs:
   linux-static-and-sandbox:
     name: Ubuntu adapter and sandbox checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       PAID_AI_API_ENABLED: "false"
       AI_API_BUDGET_USD: "0"
@@ -42,6 +42,16 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: TypeScript, lint, unit tests, and dashboard build
         run: pnpm typecheck && pnpm lint && WOORI_ALLOW_SYNTHETIC_TEST_EXECUTION=true pnpm test && pnpm build
+      - name: Validate Linux deployment policy and shell syntax
+        run: |
+          for script in deploy/linux/install.sh deploy/linux/manage.sh deploy/linux/package.sh; do bash -n "$script"; done
+          node scripts/validate-linux-package.mjs
+      - name: Build and verify a production-only Ubuntu package without browser binaries
+        run: |
+          bash deploy/linux/package.sh "$RUNNER_TEMP/woori-package"
+          archive="$(find "$RUNNER_TEMP/woori-package" -maxdepth 1 -name 'woori-ai-agent-linux-*.tar.gz' -print -quit)"
+          digest="$(cut -d' ' -f1 "$archive.sha256")"
+          bash deploy/linux/install.sh --action=verify --package="$archive" --sha256="$digest"
       - name: Record Linux host, namespace, AppArmor, systemd, and Codex sandbox diagnostics
         run: >-
           pnpm exec tsx -e 'import { diagnoseLinuxHost } from "./apps/cli/src/linux-runtime.ts";

@@ -22,6 +22,8 @@ import {approveControllerJob,controllerDashboardSnapshot, recoverExpiredControll
 import type {ControllerWorkerInput, WorkerOs} from './distributed-queue.js';
 import os from 'node:os';
 import { initializeScheduler, initializeServiceControls, recoverScheduledRun, runOneScheduledAction, runSchedulerDaemon, schedulerSnapshot, schedulerTick, updateSchedulerServiceControl } from './scheduler.js';
+import { createSqliteBackup, pruneSqliteBackups, restoreSqliteBackup, verifySqliteBackup } from './sqlite-maintenance.js';
+import { decideLinuxReadOnlyWork, linuxResourcePolicy, sampleLinuxResources } from './linux-resource-guard.js';
 
 const args=process.argv.slice(2); const command=args[0]??'help';
 const option=(name:string,fallback:string)=>args.find(a=>a.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
@@ -35,6 +37,40 @@ const runId=new Date().toISOString().replace(/[:.]/g,'-')+'-'+randomUUID().slice
 const configured=new Set(['qa','seo','content','growth','change','localization','performance','improvement','competitor','ads']);
 async function main(){
  assertNoPaidAiApi();
+ if(command==='linux-preflight'){
+  const decision=decideLinuxReadOnlyWork(sampleLinuxResources(),linuxResourcePolicy());
+  console.log(JSON.stringify({platform:process.platform,checkedAt:new Date().toISOString(),resourceGate:decision,codeModification:'Disabled',schedulerDefault:process.env.WOORI_SCHEDULER_ENABLED==='true'?'Opted in (read-only policy still enforced)':'Off',internetListener:'Loopback only'},null,2));
+  if(decision.status==='Blocked')process.exitCode=2;
+  return;
+ }
+ if(command==='db'){
+  const action=args[1]??'help',apply=option('apply','false')==='true';
+  const source=path.resolve(option('source',process.env.WOORI_CONTROLLER_DB_PATH??process.env.WOORI_AGENT_DB_PATH??'data/controller/queue.sqlite'));
+  const backupDir=path.resolve(option('directory','data/backups'));
+  if(action==='backup'){
+   const stamp=new Date().toISOString().replace(/[:.]/g,'-');
+   const destination=path.resolve(option('destination',path.join(backupDir,`woori-agent-${stamp}.sqlite`)));
+   if(!apply){console.log(JSON.stringify({status:'Dry-run',action,source,destination,method:'SQLite online backup API',willWrite:false}));return;}
+   console.log(JSON.stringify({status:'Completed',action,...await createSqliteBackup({source,destination})},null,2));return;
+  }
+  if(action==='verify'){
+   const file=path.resolve(option('backup',option('source',source)));console.log(JSON.stringify({status:'Verified',file,...verifySqliteBackup(file)},null,2));return;
+  }
+  if(action==='restore'){
+   const backup=path.resolve(option('backup',''));
+   if(!backup||backup===path.resolve('.'))throw new Error('Specify --backup=<verified-snapshot.sqlite>.');
+   const destination=path.resolve(option('destination',''));
+   if(!destination||destination===path.resolve('.'))throw new Error('Specify a new --destination path; existing databases are never overwritten.');
+   if(!apply){console.log(JSON.stringify({status:'Dry-run',action,backup,destination,willWrite:false,overwrite:'forbidden'}));return;}
+   console.log(JSON.stringify({status:'Restored',action,...restoreSqliteBackup({backup,destination})},null,2));return;
+  }
+  if(action==='prune'){
+   const keepCount=Number(option('keep-count','14')),olderDays=Number(option('older-days','90'));
+   const result=pruneSqliteBackups({directory:backupDir,keepCount,olderThanMs:olderDays*86400000,apply});
+   console.log(JSON.stringify({status:apply?'Pruned':'Dry-run',action,directory:backupDir,...result},null,2));return;
+  }
+  throw new Error('DB commands: backup [--source=...] [--destination=...] [--apply=true] | verify --backup=... | restore --backup=... --destination=<new path> [--apply=true] | prune [--directory=...] [--keep-count=14 --older-days=90 --apply=true]');
+ }
  if(command==='scheduler'){
   const action=args[1]??'status';
   if(action==='init'){console.log(JSON.stringify({...initializeScheduler(),serviceControls:initializeServiceControls()},null,2));return;}
@@ -124,7 +160,7 @@ async function main(){
   if(action==='run'){const taskId=option('task-id','');if(option('approve','false')!=='true'){const result=dryRunDevelopmentTask(taskId);console.log(JSON.stringify({...result,approvalRequired:'Repeat with --approve=true only after reviewing the task and passing --allow-paths=<glob,...>.'},null,2));if(!result.wouldExecute)process.exitCode=2;return;}const result=await executeApprovedTask({taskId,approved:true,allowedPaths:option('allow-paths',''),timeoutMs:Number(option('timeout-ms','600000'))});console.log(JSON.stringify(result,null,2));if(result.status!=='Completed')process.exitCode=2;return;}
   throw new Error('Development commands: status | doctor | codex | github | deployment [--refresh=true] | runtime-verify --service --expected-sha --source [--runtime-sha --revision-label --expected-digest --runtime-digest --image-id --health=passed|failed|unknown --workflow=success|failure|unknown --deployment=confirmed|failed|unknown --post-qa=passed|failed|not_run] | repositories | queue [--discover=true] | settings --service=<id> --code=on|off --pr=on|off --deploy=off | add --service --title --evidence --acceptance | transition --task-id --to | executions | prs | pr --task-id [--approve-pr=true] | ci --task-id | run --task-id [--approve=true --allow-paths=src/**,tests/**] | cleanup --task-id (clean worktree only)');
  }
- if(command==='help'){console.log(`Woori AI Agent\nCommands: discover | smoke | qa | seo | content | competitor | growth | ux | performance | localization | ads | adsense-approval | development | controller | worker | scheduler | change | analytics | improvement | all | report | status\nOptions: --service=all|home|calculator|tools|money|docs|quiz --profile=daily|weekly|monthly|changed --max-pages=50\nDistributed queue: controller serve|status|approve|recover; worker status|register|heartbeat|heartbeat-loop|sync|claim|transition\nScheduler: scheduler init|status|tick|run-once|daemon|control --service=... --field=...; scheduler recover --run-id=... --process-terminated=true`);return;}
+ if(command==='help'){console.log(`Woori AI Agent\nCommands: discover | smoke | qa | seo | content | competitor | growth | ux | performance | localization | ads | adsense-approval | development | controller | worker | scheduler | db | linux-preflight | change | analytics | improvement | all | report | status\nOptions: --service=all|home|calculator|tools|money|docs|quiz --profile=daily|weekly|monthly|changed --max-pages=50\nDatabase maintenance: db backup|verify|restore|prune (mutations require --apply=true; restore never overwrites)\nLinux operations: linux-preflight (resource gate, no mutation)\nDistributed queue: controller serve|status|approve|recover; worker status|register|heartbeat|heartbeat-loop|sync|claim|transition\nScheduler: scheduler init|status|tick|run-once|daemon|control --service=... --field=...; scheduler recover --run-id=... --process-terminated=true`);return;}
  if(command==='explore'){console.error('Not Configured: no autonomous model API is permitted. Use the user-run Codex interactive session with Playwright MCP; no browser actions were attempted.');process.exitCode=2;return;}
  if(command==='status'){console.log(JSON.stringify({services:config.services.map(s=>({id:s.id,label:s.label})),agents:agents.map(a=>({id:a,status:configured.has(a)?'Ready':'Not Configured'})),aiPolicy:getAiPolicy(),paidAi:'Not Configured (prohibited)'},null,2));return;}
  if(command==='report'){const db=(await import('./core.js')).initDb();const run=db.prepare('SELECT id,mode FROM runs ORDER BY started_at DESC LIMIT 1').get() as {id:string;mode:string}|undefined;if(!run){console.log('No completed scan is available yet.');return;}const checks=db.prepare('SELECT url,service,locale,status,title,description,canonical,html_lang AS htmlLang,hreflang_count AS hreflangCount,h1_count AS h1Count,errors FROM checks WHERE run_id=?').all(run.id) as Check[];const findings=db.prepare('SELECT id,service,url,locale,agent,severity,status,title,description,evidence FROM findings WHERE run_id=?').all(run.id) as Finding[];console.log(`Report: ${writeReports(run.id,run.mode,checks.map(c=>({...c,links:[],errors:JSON.parse(String(c.errors??'[]'))})),findings)}`);db.close();return;}

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
+import { decideLinuxReadOnlyWork, linuxResourcePolicy } from './linux-resource-guard.js';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { load } from 'cheerio';
@@ -182,7 +183,10 @@ async function fetchScheduledPage(initialUrl:string):Promise<{check:Check;durati
 
 async function executeAction(run: {runId:string;scheduleId:string;scheduledFor:string;action:ScheduleAction;maxPages:number;timeoutMs:number;startedAt:string}, dbPath?:string) {
   const runId=run.runId;
-  if (process.platform==='linux' && os.freemem()<384*1024*1024) throw Object.assign(new Error('Available memory is below the read-only scheduler floor.'),{code:'MEMORY_FLOOR'});
+  if (process.platform==='linux') {
+    const guard=decideLinuxReadOnlyWork(undefined,linuxResourcePolicy());
+    if(guard.status!=='Allowed') throw Object.assign(new Error(`Linux resource guard blocked scheduled work: ${guard.reasons.join(' ')}`),{code:'LINUX_RESOURCE_GUARD',details:guard});
+  }
   if (run.action==='weekly-regression-summary') {
     const db=initDb();
     const issues=db.prepare("SELECT service,state,severity,COUNT(*) AS count FROM issue_registry WHERE last_seen>=datetime('now','-7 days') GROUP BY service,state,severity ORDER BY service,state,severity").all();
