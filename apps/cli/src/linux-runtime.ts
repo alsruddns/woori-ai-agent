@@ -116,7 +116,8 @@ export function probeBubblewrapSandbox(options: { platform?: string; uid?: numbe
     if (result.status === 0 && result.stdout.includes('WOORI_BWRAP_OK') && fs.existsSync(path.join(workspace, 'write-check'))) {
       return { status: 'Ready', reason: 'Rootless bubblewrap probe passed: workspace write works; host-only path, host home, and system writes are inaccessible; network namespace creation succeeded.' };
     }
-    return { status: 'Not Configured', reason: 'bubblewrap isolation probe failed or user namespaces are restricted; Linux code execution remains disabled.' };
+    const diagnostic = (result.stderr || result.error?.message || '').replace(/\s+/g, ' ').slice(0, 240);
+    return { status: 'Not Configured', reason: `bubblewrap isolation probe failed (exit ${result.status ?? 'unknown'}) or user namespaces are restricted; Linux code execution remains disabled.${diagnostic ? ` Runner diagnostic: ${diagnostic}` : ''}` };
   } catch {
     return { status: 'Not Configured', reason: 'bubblewrap isolation probe could not complete.' };
   } finally {

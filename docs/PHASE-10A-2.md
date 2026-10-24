@@ -27,6 +27,6 @@ Linux에서는 이 단계에서 ChatGPT 인증 파일을 암호화해 복사하�
 
 ## CI
 
-`.github/workflows/linux-platform.yml`은 Ubuntu 24.04에서 Node 22, pnpm 9.12.1, TypeScript, ESLint, Vitest, Dashboard build 및 실제 rootless bubblewrap probe를 수행한다. Workflow는 읽기 전용 권한이며 Codex, API 키, GitHub token, 운영 secrets를 사용하지 않는다.
+`.github/workflows/linux-platform.yml`은 Ubuntu 24.04에서 Node 22, pnpm 9.12.1, TypeScript, ESLint, Vitest, Dashboard build 및 rootless bubblewrap probe를 수행한다. Hosted runner가 user namespace를 막으면 probe 결과를 `Not Configured` 경고로 남기고 CI는 정적 호환성만 성공 처리한다. 이런 결과는 Linux Codex Worker를 `Ready`로 만들지 않는다. Workflow는 Codex, API 키, GitHub token, 운영 secrets를 사용하지 않는다.
 
 공식 설명: [Codex sandboxing](https://learn.chatgpt.com/docs/sandboxing)
