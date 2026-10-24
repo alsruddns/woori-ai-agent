@@ -29,7 +29,9 @@ with tarfile.open(sys.argv[1], "r:gz") as archive:
         if name.startswith("/") or normalized == ".." or normalized.startswith("../"):
             raise SystemExit("Unsafe archive path.")
         if member.islnk():
-            raise SystemExit("Hard links are not accepted in packages.")
+            target = posixpath.normpath(member.linkname.removeprefix("./"))
+            if member.linkname.startswith("/") or target == ".." or target.startswith("../"):
+                raise SystemExit("Package contains a hard link escaping its root.")
         if member.issym():
             target = posixpath.normpath(posixpath.join(posixpath.dirname(normalized), member.linkname))
             if member.linkname.startswith("/") or target == ".." or target.startswith("../"):
