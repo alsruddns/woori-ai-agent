@@ -24,6 +24,7 @@ export type LinuxSandboxDiagnostics = {
   kernel: string | null;
   uid: number | null;
   codexCli: LinuxRuntimeCheck & { version?: string };
+  codexAuth: LinuxRuntimeCheck;
   bubblewrapCli: LinuxRuntimeCheck & { path?: string; version?: string };
   userNamespace: LinuxRuntimeCheck;
   networkNamespace: LinuxRuntimeCheck;
@@ -130,7 +131,7 @@ export function diagnoseLinuxHost(options: { platform?: string; uid?: number | n
   const uid = options.uid === undefined ? process.getuid?.() ?? null : options.uid;
   if (platform !== 'linux') {
     const unavailable = { status: 'Not Configured' as const, reason: 'Linux host diagnostics run only on Linux.' };
-    return { checkedAt: new Date().toISOString(), platform, os: null, kernel: null, uid, codexCli: unavailable, bubblewrapCli: unavailable, userNamespace: unavailable, networkNamespace: unavailable, appArmor: { enabled: null, restrictUnprivilegedUserns: null, bwrapProfiles: [], status: 'Not Configured outside Linux.' }, systemdLimits: unavailable, processSecurity: { noNewPrivileges: null, seccompMode: null }, sandboxBoundary: unavailable, codexSandbox: unavailable, codeModificationEnabled: false, note: 'Linux write execution remains disabled until the complete sandbox/authentication boundary is separately verified.' };
+    return { checkedAt: new Date().toISOString(), platform, os: null, kernel: null, uid, codexCli: unavailable, codexAuth: unavailable, bubblewrapCli: unavailable, userNamespace: unavailable, networkNamespace: unavailable, appArmor: { enabled: null, restrictUnprivilegedUserns: null, bwrapProfiles: [], status: 'Not Configured outside Linux.' }, systemdLimits: unavailable, processSecurity: { noNewPrivileges: null, seccompMode: null }, sandboxBoundary: unavailable, codexSandbox: unavailable, codeModificationEnabled: false, note: 'Linux write execution remains disabled until the complete sandbox/authentication boundary is separately verified.' };
   }
 
   const release = readOptional('/etc/os-release');
@@ -142,6 +143,13 @@ export function diagnoseLinuxHost(options: { platform?: string; uid?: number | n
   const codexCli: LinuxSandboxDiagnostics['codexCli'] = codexPath && codexVersion?.status === 0
     ? { status: 'Ready', reason: 'Codex CLI version command succeeded; this does not confirm authentication or authorize a model request.', version: codexVersion.stdout.slice(0, 80) }
     : { status: 'Not Configured', reason: 'Codex CLI is not installed or its version could not be read; no AI request was attempted.' };
+  const codexLogin = codexPath ? boundedProbe(codexPath, ['login', 'status'], 4_000) : null;
+  const loginOutput = `${codexLogin?.stdout ?? ''}\n${codexLogin?.stderr ?? ''}`;
+  const codexAuth: LinuxRuntimeCheck = codexPath && codexLogin?.status === 0 && /logged in using chatgpt/i.test(loginOutput)
+    ? { status: 'Ready', reason: 'Codex reports ChatGPT account login. No model request was made.' }
+    : /api key/i.test(loginOutput)
+      ? { status: 'Blocked', reason: 'Codex reports API-key authentication; paid API credentials are prohibited.' }
+      : { status: 'Not Configured', reason: codexPath ? 'ChatGPT login status could not be confirmed; no model request was made.' : 'Codex CLI is unavailable; login status was not checked.' };
 
   const bwrapPath = findExecutable('bwrap');
   const bwrapVersion = bwrapPath ? boundedProbe(bwrapPath, ['--version'], 2_000) : null;
@@ -178,11 +186,11 @@ export function diagnoseLinuxHost(options: { platform?: string; uid?: number | n
   const systemdLimits = (options.probeResources ?? probeSystemdLimits)(limits);
   const sandboxBoundary = (options.probeBoundary ?? (() => probeBubblewrapSandbox({ platform, uid })))();
   const codexSandbox = codexPath
-    ? commandCheck(codexPath, ['sandbox', 'linux', truePath], 'Official Codex Linux command sandbox executed successfully; no model request was made.', 'Official Codex Linux sandbox command failed')
+    ? commandCheck(codexPath, ['sandbox', 'linux', '--permissions-profile', 'read-only', truePath], 'Official Codex Linux read-only command sandbox executed successfully; no model request was made.', 'Official Codex Linux read-only sandbox command failed')
     : { status: 'Not Configured' as const, reason: 'Codex CLI is unavailable; official Codex sandbox probe was not run.' };
 
   return {
-    checkedAt: new Date().toISOString(), platform, os: osName, kernel, uid, codexCli, bubblewrapCli,
+    checkedAt: new Date().toISOString(), platform, os: osName, kernel, uid, codexCli, codexAuth, bubblewrapCli,
     userNamespace, networkNamespace, appArmor, systemdLimits, processSecurity, sandboxBoundary, codexSandbox,
     codeModificationEnabled: false,
     note: 'Diagnostics never change sysctl, AppArmor, seccomp, or host namespace settings. Linux code modification remains disabled; ChatGPT login and an isolated write-boundary test are not inferred from these probes.',

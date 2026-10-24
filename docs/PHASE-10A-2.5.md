@@ -32,7 +32,7 @@ Windows MXC와 DPAPI 경로는 변경하지 않았다. iwinv 운영 서버, 운�
 pnpm agent development linux-diagnostics
 ```
 
-진단은 다음 상태를 읽기 전용으로 수집한다: 배포판과 커널, Codex/Bubblewrap 경로 및 버전, rootless user/network namespace probe, AppArmor와 unprivileged-userns 제한, 프로세스의 no-new-privileges/seccomp 값, user systemd CPU·메모리·task 제한 probe, 임시 디렉터리에서의 Bubblewrap 파일·네트워크 경계, 설치된 경우 `codex sandbox linux` 실행 결과.
+진단은 다음 상태를 읽기 전용으로 수집한다: 배포판과 커널, Codex/Bubblewrap 경로 및 버전, Codex의 로그인 방식(상태만 읽고 출력 원문은 보존하지 않음), rootless user/network namespace probe, AppArmor와 unprivileged-userns 제한, 프로세스의 no-new-privileges/seccomp 값, user systemd CPU·메모리·task 제한 probe, 임시 디렉터리에서의 Bubblewrap 파일·네트워크 경계, 설치된 경우 공식 `codex sandbox linux --permissions-profile read-only` probe.
 
 진단은 sysctl, AppArmor, seccomp 설정을 바꾸지 않는다. CI에서는 Codex CLI가 없는 것이 정상이며, 이에 따라 Codex 및 인증 상태가 `Not Configured`로 기록된다. CI는 AI 모델 호출이나 인증 파일을 사용하지 않는다.
 
