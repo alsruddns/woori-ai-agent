@@ -17,6 +17,10 @@ import {cleanupDevelopmentWorktree,codexReadiness,executeApprovedTask,listDevelo
 import {createDraftPullRequest,githubConnectionStatus,listDevelopmentPullRequests,refreshPullRequestChecks} from './github-pr.js';
 import {deploymentReadiness,refreshDeploymentRuns,recordRuntimeVerification} from './deployment-orchestrator.js';
 import {diagnoseLinuxHost} from './linux-runtime.js';
+import {createDistributedControllerServer,controllerWorkerRequest,heartbeatWorkerWithController,registerWorkerWithController,submitWorkerQueueToController} from './distributed-controller-http.js';
+import {approveControllerJob,controllerDashboardSnapshot, recoverExpiredControllerJob} from './distributed-queue.js';
+import type {ControllerWorkerInput, WorkerOs} from './distributed-queue.js';
+import os from 'node:os';
 
 const args=process.argv.slice(2); const command=args[0]??'help';
 const option=(name:string,fallback:string)=>args.find(a=>a.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
@@ -30,6 +34,56 @@ const runId=new Date().toISOString().replace(/[:.]/g,'-')+'-'+randomUUID().slice
 const configured=new Set(['qa','seo','content','growth','change','localization','performance','improvement','competitor','ads']);
 async function main(){
  assertNoPaidAiApi();
+ if(command==='controller'){
+  const action=args[1]??'status';
+  if(action==='status'){console.log(JSON.stringify(controllerDashboardSnapshot(),null,2));return;}
+  if(action==='serve'){const controller=createDistributedControllerServer();await controller.listen();console.log(`Distributed Controller listening on ${controller.host}:${controller.port}; database path is not printed.`);for(const signal of ['SIGINT','SIGTERM'] as const)process.once(signal,()=>{void controller.close().then(()=>process.exit(0));});return;}
+  if(action==='approve'){const jobId=option('job-id','');if(option('approve','false')!=='true')throw new Error('Local operator approval is required: repeat with --approve=true after reviewing the job.');console.log(JSON.stringify(approveControllerJob(jobId),null,2));return;}
+  if(action==='recover'){console.log(JSON.stringify(recoverExpiredControllerJob({jobId:option('job-id',''),processTerminated:option('process-terminated','false')==='true',verifiedBy:option('verified-by',''),evidence:option('evidence','')}),null,2));return;}
+  throw new Error('Controller commands: serve | status | approve --job-id=... --approve=true | recover --job-id=... --process-terminated=true --verified-by=... --evidence=...');
+ }
+ if(command==='worker'){
+  const action=args[1]??'status';
+  if(action==='heartbeat-loop'){
+   const workerId=process.env.WOORI_CONTROLLER_WORKER_ID??'',hostLabel=process.env.WOORI_CONTROLLER_HOST_LABEL??'';
+   if(!workerId||!hostLabel)throw new Error('Set a stable Worker ID and a non-identifying WOORI_CONTROLLER_HOST_LABEL.');
+   const intervalSeconds=Number(option('interval-seconds','30'));
+   if(!Number.isInteger(intervalSeconds)||intervalSeconds<15||intervalSeconds>120)throw new Error('Heartbeat interval must be 15–120 seconds.');
+   const jobId=option('job-id',''),leaseId=option('lease-id',''),fencingTokenRaw=option('fencing-token','');
+   if(Boolean(jobId||leaseId||fencingTokenRaw)&&(!jobId||!leaseId||!/^\d+$/.test(fencingTokenRaw)))throw new Error('Lease renewal requires all of --job-id, --lease-id and --fencing-token.');
+   let stopping=false,first=true,lastErrorCode:string|null=null;const readiness=codexReadiness() as any;
+   process.once('SIGINT',()=>{stopping=true;}); process.once('SIGTERM',()=>{stopping=true;});
+   while(!stopping){
+    try{
+     const input=workerHeartbeatInput(hostLabel,jobId||null,jobId?'Running':'Idle',lastErrorCode,readiness);
+     if(first&&!jobId)await registerWorkerWithController(input);else await heartbeatWorkerWithController(input);first=false;
+     if(jobId)await controllerWorkerRequest('/v1/leases/renew',{jobId,leaseId,fencingToken:Number(fencingTokenRaw),leaseMs:intervalSeconds*3000});
+     lastErrorCode=null;
+     console.log(JSON.stringify({workerId,platform:platformAdaptersRuntime(),status:'Heartbeat acknowledged',currentJobId:jobId||null,at:new Date().toISOString()}));
+    }catch(error){
+     const stale=error instanceof Error&&/stale|expired|fencing|lease/i.test(error.message);
+     console.error(JSON.stringify({workerId,status:stale?'Lease rejected; stopping':'Controller unavailable; no offline claim attempted',errorCode:stale?'LEASE_REJECTED':'CONTROLLER_UNAVAILABLE',at:new Date().toISOString()}));
+     lastErrorCode=stale?'LEASE_REJECTED':'CONTROLLER_UNAVAILABLE';
+     if(stale)break;
+    }
+    if(!stopping)await new Promise(resolve=>setTimeout(resolve,intervalSeconds*1000));
+   }
+   return;
+  }
+  if(action==='status'){const readiness=codexReadiness() as any;console.log(JSON.stringify({platform:platformAdaptersRuntime(),workerIdConfigured:Boolean(process.env.WOORI_CONTROLLER_WORKER_ID),controllerConfigured:Boolean(process.env.WOORI_CONTROLLER_URL),codexCliStatus:readiness.executionReady?'Ready':'Not Configured',chatgptLoginStatus:readiness.auth?.status??'Not Configured',sandboxStatus:readiness.sandbox?.status??'Not Configured',linuxCodeModification:'Blocked',centralHeartbeat:'Not Queried (use worker heartbeat or heartbeat-loop)'},null,2));return;}
+  if(action==='register'||action==='heartbeat'){
+   const workerId=process.env.WOORI_CONTROLLER_WORKER_ID??'',hostLabel=process.env.WOORI_CONTROLLER_HOST_LABEL??'';
+   if(!workerId||!hostLabel)throw new Error('Set a stable Worker ID and a non-identifying WOORI_CONTROLLER_HOST_LABEL.');
+   const adapter=platformAdaptersRuntime();
+   const input=workerHeartbeatInput(hostLabel,option('job-id','')||null,option('execution-status',action==='register'?'Registered':'Idle'),option('error-code','')||null);
+   const result=action==='register'?await registerWorkerWithController(input):await heartbeatWorkerWithController(input);
+   console.log(JSON.stringify({result,workerId,platform:adapter},null,2));return;
+  }
+  if(action==='sync'){console.log(JSON.stringify(await submitWorkerQueueToController(),null,2));return;}
+  if(action==='claim'){const result=await controllerWorkerRequest('/v1/jobs/claim',{leaseMs:Number(option('lease-ms','60000'))});console.log(JSON.stringify(result,null,2));return;}
+  if(action==='transition'){const result=await controllerWorkerRequest('/v1/jobs/transition',{jobId:option('job-id',''),leaseId:option('lease-id',''),fencingToken:Number(option('fencing-token','0')),status:option('status','Running'),result:{summaryCode:option('summary-code','')||undefined,testsPassed:option('tests-passed','')==='true'?true:undefined,changedFilesCount:option('changed-files','')?Number(option('changed-files','')):undefined},failureCode:option('error-code','')||undefined});console.log(JSON.stringify(result,null,2));return;}
+  throw new Error('Worker commands: register | heartbeat [--job-id=...] | heartbeat-loop [--interval-seconds=30 --job-id=... --lease-id=... --fencing-token=...] | sync | claim | transition --job-id=... --lease-id=... --fencing-token=... --status=Running|Testing|Completed|Failed');
+ }
  if(command==='gsc'){
   const subcommand=args[1]??'run';
   if(subcommand==='properties'){const result=await discoverGscProperties(runId);console.log(JSON.stringify(result,null,2));if(result.status==='Failed')process.exitCode=1;return;}
@@ -58,7 +112,7 @@ async function main(){
   if(action==='run'){const taskId=option('task-id','');if(option('approve','false')!=='true'){const result=dryRunDevelopmentTask(taskId);console.log(JSON.stringify({...result,approvalRequired:'Repeat with --approve=true only after reviewing the task and passing --allow-paths=<glob,...>.'},null,2));if(!result.wouldExecute)process.exitCode=2;return;}const result=await executeApprovedTask({taskId,approved:true,allowedPaths:option('allow-paths',''),timeoutMs:Number(option('timeout-ms','600000'))});console.log(JSON.stringify(result,null,2));if(result.status!=='Completed')process.exitCode=2;return;}
   throw new Error('Development commands: status | doctor | codex | github | deployment [--refresh=true] | runtime-verify --service --expected-sha --source [--runtime-sha --revision-label --expected-digest --runtime-digest --image-id --health=passed|failed|unknown --workflow=success|failure|unknown --deployment=confirmed|failed|unknown --post-qa=passed|failed|not_run] | repositories | queue [--discover=true] | settings --service=<id> --code=on|off --pr=on|off --deploy=off | add --service --title --evidence --acceptance | transition --task-id --to | executions | prs | pr --task-id [--approve-pr=true] | ci --task-id | run --task-id [--approve=true --allow-paths=src/**,tests/**] | cleanup --task-id (clean worktree only)');
  }
- if(command==='help'){console.log(`Woori AI Agent\nCommands: discover | smoke | qa | seo | content | competitor | growth | ux | performance | localization | ads | adsense-approval | development | change | analytics | improvement | all | report | status\nOptions: --service=all|home|calculator|tools|money|docs|quiz --profile=daily|weekly|monthly|changed --max-pages=50`);return;}
+ if(command==='help'){console.log(`Woori AI Agent\nCommands: discover | smoke | qa | seo | content | competitor | growth | ux | performance | localization | ads | adsense-approval | development | controller | worker | change | analytics | improvement | all | report | status\nOptions: --service=all|home|calculator|tools|money|docs|quiz --profile=daily|weekly|monthly|changed --max-pages=50\nDistributed queue: controller serve|status|approve|recover; worker status|register|heartbeat|heartbeat-loop|sync|claim|transition`);return;}
  if(command==='explore'){console.error('Not Configured: no autonomous model API is permitted. Use the user-run Codex interactive session with Playwright MCP; no browser actions were attempted.');process.exitCode=2;return;}
  if(command==='status'){console.log(JSON.stringify({services:config.services.map(s=>({id:s.id,label:s.label})),agents:agents.map(a=>({id:a,status:configured.has(a)?'Ready':'Not Configured'})),aiPolicy:getAiPolicy(),paidAi:'Not Configured (prohibited)'},null,2));return;}
  if(command==='report'){const db=(await import('./core.js')).initDb();const run=db.prepare('SELECT id,mode FROM runs ORDER BY started_at DESC LIMIT 1').get() as {id:string;mode:string}|undefined;if(!run){console.log('No completed scan is available yet.');return;}const checks=db.prepare('SELECT url,service,locale,status,title,description,canonical,html_lang AS htmlLang,hreflang_count AS hreflangCount,h1_count AS h1Count,errors FROM checks WHERE run_id=?').all(run.id) as Check[];const findings=db.prepare('SELECT id,service,url,locale,agent,severity,status,title,description,evidence FROM findings WHERE run_id=?').all(run.id) as Finding[];console.log(`Report: ${writeReports(run.id,run.mode,checks.map(c=>({...c,links:[],errors:JSON.parse(String(c.errors??'[]'))})),findings)}`);db.close();return;}
@@ -113,5 +167,12 @@ async function main(){
  if(failed||Object.values(statuses).includes('Failed'))process.exitCode=1;
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});
+
+function platformAdaptersRuntime(){return process.platform==='win32'?'windows':process.platform==='linux'?'linux':'unsupported';}
+function workerHeartbeatInput(hostLabel:string,currentJobId:string|null,executionStatus:string,lastErrorCode:string|null=null,readinessOverride?:any):Omit<ControllerWorkerInput,'workerId'>{
+ if(process.platform!=='win32'&&process.platform!=='linux')throw new Error(`Distributed Workers are unsupported on ${process.platform}.`);
+ const readiness=readinessOverride??codexReadiness() as any,workerOs:WorkerOs=process.platform==='win32'?'windows':'linux';
+ return {os:workerOs,hostLabel,capabilities:['http','qa','seo','content','github-read','lighthouse','playwright',...(workerOs==='windows'&&readiness.executionReady?['codex-write','build']:[])],codexCliStatus:readiness.executionReady?'Ready':'Not Configured',chatgptLoginStatus:String(readiness.auth?.status??'Not Configured'),sandboxStatus:String(readiness.sandbox?.status??'Not Configured'),cpuCount:os.cpus().length,availableMemoryBytes:os.freemem(),currentJobId,executionStatus,lastErrorCode};
+}
 
 function metadataReview(pages:Check[],agent:'seo'|'localization',runId:string){const findings:Finding[]=[];for(const c of pages){const add=(severity:Finding['severity'],title:string,description:string)=>findings.push({id:`${runId}-${agent}-${findings.length+1}`,service:c.service,url:c.url,locale:c.locale,agent,severity,status:'confirmed',title,description});if(agent==='seo'){if(!c.title)add('Medium','Missing title','No document title was observed.');if(!c.description)add('Low','Missing meta description','No meta description was observed.');if(!c.canonical)add('Medium','Missing canonical','No canonical link was observed.');if(c.h1Count!==1)add('Low','Unexpected H1 count',`Expected 1; observed ${c.h1Count}.`);}else{const normalize=(v:string)=>v.toLowerCase().replace('_','-');if(!c.htmlLang)add('Medium','Missing document language','No html lang attribute was observed.');else if(c.locale!=='unknown'&&!normalize(c.htmlLang).startsWith(normalize(c.locale)))add('Medium','Document language mismatch',`Route locale ${c.locale}, html lang=${c.htmlLang}.`);if(!c.hreflangCount)add('Low','No hreflang alternates','No alternate locale links were observed.');}}return{checks:pages,findings};}

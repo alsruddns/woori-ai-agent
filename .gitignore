@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 data/*.sqlite*
+data/controller/
 data/*.dpapi
 data/*credentials*.json
 data/development-executions/**
