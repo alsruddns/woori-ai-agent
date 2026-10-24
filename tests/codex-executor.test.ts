@@ -5,7 +5,8 @@ import { execFileSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import { enqueueDevelopmentTask, listDevelopmentTasks, transitionDevelopmentTask } from '../apps/cli/src/development-orchestrator.js';
 import { cleanupDevelopmentWorktree, codexExecutorInternals, executeApprovedTask, listDevelopmentExecutions } from '../apps/cli/src/codex-executor.js';
-import { codexExecArgs, paidCredentialVariablesPresent, parseAllowedPaths, pathMatchesAllowlist, redactCodexOutput, safeCodexEnv } from '../apps/cli/src/codex-cli.js';
+import { codexExecArgs, paidCredentialVariablesPresent, parseAllowedPaths, pathMatchesAllowlist, probeCodexSandbox, redactCodexOutput, safeCodexEnv } from '../apps/cli/src/codex-cli.js';
+import type { LinuxRuntimeReadiness } from '../apps/cli/src/linux-runtime.js';
 
 const previousDb=process.env.WOORI_AGENT_DB_PATH;
 let tempDir:string|undefined;
@@ -49,6 +50,16 @@ describe('Codex local execution safety',()=>{
   const root=setup();const taskId=makeTask();let invoked=false;
   const result=await executeApprovedTask({taskId,approved:true,platform:'linux',allowedPaths:'src/**',launcher:fakeCli(root),repositoryOverride:repository(path.join(root,'source'),{codeAutomationEnabled:true}),sandboxProbe:()=>({status:'Not Configured',message:'Linux sandbox has not been verified.',exitCode:null}),runCodex:async()=>{invoked=true;return{exitCode:0,timedOut:false,stdout:'',stderr:''};}});
   expect(result.status).toBe('Blocked');expect(result.error).toMatch(/Linux sandbox has not been verified/i);expect(invoked).toBe(false);
+ });
+
+ it('does not let a CLI version environment variable unlock Linux write execution',()=>{
+  const previous=process.env.WOORI_LINUX_CODEX_SANDBOX_VERIFIED_VERSION;
+  process.env.WOORI_LINUX_CODEX_SANDBOX_VERIFIED_VERSION='codex-cli 9.9.9';
+  try{
+   const runtime={platform:'linux',runnable:true,userIsolation:{status:'Ready',reason:'fixture'},bubblewrap:{status:'Ready',reason:'fixture'},resourceLimits:{status:'Ready',reason:'fixture'},availableMemoryBytes:4_000_000_000,cpuCount:4,loadAverage:[0,0,0],limits:{cpuQuotaPercent:100,memoryMaxBytes:768*1024*1024,tasksMax:128},reasons:[]} as LinuxRuntimeReadiness;
+   const result=probeCodexSandbox(null,{platform:'linux',linuxRuntime:()=>runtime});
+   expect(result.status).toBe('Not Configured');expect(result.message).toMatch(/remains disabled/i);expect(result.message).toMatch(/cannot unlock/i);
+  }finally{if(previous===undefined)delete process.env.WOORI_LINUX_CODEX_SANDBOX_VERIFIED_VERSION;else process.env.WOORI_LINUX_CODEX_SANDBOX_VERIFIED_VERSION=previous;}
  });
 
  it('blocks API-key environments before creating a worktree or invoking Codex',async()=>{

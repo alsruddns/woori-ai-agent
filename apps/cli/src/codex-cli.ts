@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createPlatformAdapter, detectCodexHome } from './platform-adapters.js';
-import { inspectLinuxRuntime } from './linux-runtime.js';
+import { inspectLinuxRuntime, type LinuxRuntimeReadiness } from './linux-runtime.js';
 
 export type CodexLauncher = { kind:'node'|'exe'; executable:string; prefixArgs:string[]; version:string };
 const credentialEnvNames=['OPENAI_API_KEY','CODEX_API_KEY','OPENAI_BASE_URL','OPENAI_API_BASE','CODEX_BASE_URL','ANTHROPIC_API_KEY','GEMINI_API_KEY','GOOGLE_API_KEY'];
@@ -82,14 +82,13 @@ export function probeMxcSandbox(cli=discoverCodexCli()):SandboxProbeResult{
  if(result.status===0&&result.stdout.includes('WOORI_MXC_OK'))return{status:'Ready',message:'MXC workspace sandbox probe succeeded.',exitCode:0};
  return{status:'Not Configured',message:'MXC workspace sandbox probe failed; workspace-write execution is blocked.',exitCode:result.status??1};
 }
-export function probeCodexSandbox(cli=discoverCodexCli()):SandboxProbeResult{
- if(process.platform==='win32')return probeMxcSandbox(cli);
- if(process.platform!=='linux')return{status:'Not Configured',message:'Codex write execution is supported only on Windows or Linux.',exitCode:null};
- const runtime=inspectLinuxRuntime();
+export function probeCodexSandbox(cli=discoverCodexCli(),options:{platform?:string;linuxRuntime?:()=>LinuxRuntimeReadiness}={}):SandboxProbeResult{
+ const platform=options.platform??process.platform;
+ if(platform==='win32')return probeMxcSandbox(cli);
+ if(platform!=='linux')return{status:'Not Configured',message:'Codex write execution is supported only on Windows or Linux.',exitCode:null};
+ const runtime=(options.linuxRuntime??inspectLinuxRuntime)();
  if(!runtime.runnable)return{status:'Not Configured',message:runtime.reasons.join(' '),exitCode:null,details:runtime};
- const verifiedVersion=process.env.WOORI_LINUX_CODEX_SANDBOX_VERIFIED_VERSION;
- if(!cli||verifiedVersion!==cli.version)return{status:'Not Configured',message:'Linux host prerequisites passed, but this exact Codex CLI version has not completed a ChatGPT-authenticated sandbox boundary test; write execution remains disabled.',exitCode:null,details:runtime};
- return{status:'Ready',message:'Linux rootless bubblewrap, private worker home, cgroup resource limits and this Codex CLI version are verified.',exitCode:0,details:runtime};
+ return{status:'Not Configured',message:'Linux host prerequisites may pass, but workspace-write remains disabled until the real Ubuntu network, filesystem, process cleanup, resource-limit, ChatGPT-authentication and temporary-repository verification suite is completed and reviewed. A version environment variable cannot unlock it.',exitCode:null,details:runtime};
 }
 
 export function parseAllowedPaths(input:string):string[]{

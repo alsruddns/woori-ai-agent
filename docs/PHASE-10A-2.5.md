@@ -14,6 +14,18 @@ Windows MXC와 DPAPI 경로는 변경하지 않았다. iwinv 운영 서버, 운�
 - Windows 개발 PC에서 WSL이 설치되지 않아 실제 Ubuntu 로컬 검증은 수행하지 않았다.
 - Ubuntu에서 Codex ChatGPT 인증, Codex sandbox, workspace 수정, systemd CPU/메모리 제한은 아직 실증되지 않았다.
 
+## Phase 10A-2.5 Ubuntu 실행 결과
+
+- Workflow Run `40095171933`, commit `8ef60519c9c17bc778bff27ceab1133014e8d334`가 성공했다.
+- Runner: Ubuntu 24.04.5 LTS, kernel `6.17.0-1022-azure`, UID 1001.
+- Bubblewrap: `/usr/bin/bwrap`, version 0.9.0. Codex CLI는 설치되지 않아 버전·인증·Codex sandbox 테스트는 `Not Configured`였다.
+- Rootless user namespace probe는 `/proc/self/uid_map: Operation not permitted`로 거부됐다. network namespace probe도 같은 단계에서 거부됐다.
+- AppArmor가 활성화됐고 `apparmor_restrict_unprivileged_userns=1`로 확인됐다. 해당 환경에서 user namespace 거부와 Bubblewrap `RTM_NEWADDR` 실패가 함께 재현됐다. AppArmor가 실패의 유일한 원인이라고 단정하지 않는다.
+- user systemd scope에서 CPUQuota 100%, MemoryMax 768 MiB, TasksMax 128 probe는 통과했다. 이는 테스트용 `true` 프로세스에 적용된 결과이며 Codex 작업 부하의 적정성까지 검증한 것은 아니다.
+- Runner 바깥 프로세스는 `NoNewPrivs=0`, `Seccomp=0`이었다. Bubblewrap가 시작되지 않아 sandbox 내부 seccomp 적용은 검증되지 않았다.
+- 실제 Bubblewrap filesystem/network boundary probe는 `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`로 실패했다. workflow 전체의 정적 검사는 통과했고, 해당 미지원 상태는 경고로 남겼다.
+- 진단 후 Linux workspace-write를 CLI 버전 환경변수로 켤 수 없도록 차단을 강화했다. 모든 호스트 probe가 Ready여도 이 Phase에서는 Linux 수정 실행기가 `Not Configured`를 반환한다.
+
 ## 새 진단 명령
 
 ```bash
