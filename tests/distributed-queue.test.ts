@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 import { approveControllerJob, assertCurrentControllerLease, claimControllerJob, controllerDashboardSnapshot, heartbeatControllerWorker, recoverExpiredControllerJob, registerControllerWorker, renewControllerLease, submitControllerJob, transitionControllerJob } from '../apps/cli/src/distributed-queue.js';
 import { controllerNetworkPolicy, controllerWorkerRequest, createDistributedControllerServer, ensureDevelopmentGlobalJobMap } from '../apps/cli/src/distributed-controller-http.js';
+import { getAgentPolicy,listPolicyAudit,updateAgentPolicy } from '../apps/cli/src/agent-policy.js';
 
 let root = '';
 const dbPath = () => path.join(root, 'controller.sqlite');
@@ -142,6 +143,21 @@ describe('distributed Controller lease safety', () => {
   }finally{await app.close();}
  });
 
+ it('synchronizes the current policy to authenticated Workers and emergency stop blocks new claims',async()=>{
+  const file=setup(),token='control-policy-worker-token-with-over-32-characters-01';
+  const app=createDistributedControllerServer({host:'127.0.0.1',port:0,dbPath:file,workerTokens:{'worker-policy-sync':token},workerPolicies:{'worker-policy-sync':{os:'windows',allowCodeChanges:false}}});await app.listen();
+  const base=`http://127.0.0.1:${(app.server.address() as {port:number}).port}`;
+  try{
+   await request(`${base}/v1/workers/register`,token,'worker-policy-sync',crypto.randomUUID(),worker('worker-policy-sync'));
+   const policy=await request(`${base}/v1/policy/current`,token,'worker-policy-sync',crypto.randomUUID(),{});expect(policy.status).toBe(200);expect((await policy.json() as any).result).toMatchObject({version:1,mode:'MONITOR_ONLY',emergencyStop:false});
+   const current=getAgentPolicy(file);updateAgentPolicy({expectedVersion:current.version,actor:'integration-test',reason:'advance worker policy',patch:{mode:'BUG_FIX'}},file);
+   const staleClaim=await request(`${base}/v1/jobs/claim`,token,'worker-policy-sync',crypto.randomUUID(),{policyVersion:1,leaseMs:60_000});expect(staleClaim.status).toBe(409);expect(await staleClaim.json()).toMatchObject({error:'POLICY_VERSION_STALE:2'});
+   const latest=getAgentPolicy(file);updateAgentPolicy({expectedVersion:latest.version,actor:'integration-test',reason:'verify emergency gate',patch:{emergencyStop:true}},file);
+   const refreshed=await request(`${base}/v1/policy/current`,token,'worker-policy-sync',crypto.randomUUID(),{});expect((await refreshed.json() as any).result).toMatchObject({version:3,emergencyStop:true});expect(listPolicyAudit(file)[0]).toMatchObject({policyVersion:3,workerSyncStatus:'Acknowledged by 1 Worker(s)',workers:[{workerId:'worker-policy-sync',policyVersion:3}]});
+   const claim=await request(`${base}/v1/jobs/claim`,token,'worker-policy-sync',crypto.randomUUID(),{policyVersion:3,leaseMs:60_000});expect(claim.status).toBe(403);expect(await claim.json()).toMatchObject({error:'POLICY_BLOCKED:3'});
+  }finally{await app.close();}
+ });
+
  it('uses Controller-provisioned OS and write policy instead of trusting Worker readiness claims', async () => {
   const file=setup(),token='policy-worker-test-secret-0123456789-abcdefgh';
   expect(()=>createDistributedControllerServer({host:'127.0.0.1',port:0,dbPath:file,workerPolicies:{'worker-policy-02':{os:'linux',allowCodeChanges:true}}})).toThrow(/Linux code modification cannot be provisioned/i);
@@ -153,7 +169,7 @@ describe('distributed Controller lease safety', () => {
    const registerUrl=`${base}/v1/workers/register`,nonce=crypto.randomUUID();
    const accepted=await request(registerUrl,token,'worker-policy-01',nonce,worker('worker-policy-01','linux'));expect(accepted.status).toBe(200);
    const code=submitControllerJob({service:'docs',kind:'bug',workClass:'code_change',requiredOs:'windows',idempotencyKey:'policy-lock',title:'must not run'},file);approveControllerJob(code.globalJobId,file);
-   const claimed=await request(`${base}/v1/jobs/claim`,token,'worker-policy-01',crypto.randomUUID(),{leaseMs:60_000});
+   const claimed=await request(`${base}/v1/jobs/claim`,token,'worker-policy-01',crypto.randomUUID(),{policyVersion:1,leaseMs:60_000});
    expect((await claimed.json() as {result:unknown}).result).toBeNull();
    expect(controllerDashboardSnapshot(file).workers[0]?.allowCodeChanges).toBe(false);
   }finally{await app.close();}

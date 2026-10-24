@@ -108,7 +108,7 @@ async function main(){
     try{
      const input=workerHeartbeatInput(hostLabel,jobId||null,jobId?'Running':'Idle',lastErrorCode,readiness);
      if(first&&!jobId)await registerWorkerWithController(input);else await heartbeatWorkerWithController(input);first=false;
-     if(jobId)await controllerWorkerRequest('/v1/leases/renew',{jobId,leaseId,fencingToken:Number(fencingTokenRaw),leaseMs:intervalSeconds*3000});
+     if(jobId){const current=await controllerWorkerRequest<{version:number}>('/v1/policy/current',{});await controllerWorkerRequest('/v1/leases/renew',{jobId,leaseId,fencingToken:Number(fencingTokenRaw),policyVersion:current.version,leaseMs:intervalSeconds*3000});}
      lastErrorCode=null;
      console.log(JSON.stringify({workerId,platform:platformAdaptersRuntime(),status:'Heartbeat acknowledged',currentJobId:jobId||null,at:new Date().toISOString()}));
     }catch(error){
@@ -131,9 +131,10 @@ async function main(){
    console.log(JSON.stringify({result,workerId,platform:adapter},null,2));return;
   }
   if(action==='sync'){console.log(JSON.stringify(await submitWorkerQueueToController(),null,2));return;}
-  if(action==='claim'){const result=await controllerWorkerRequest('/v1/jobs/claim',{leaseMs:Number(option('lease-ms','60000'))});console.log(JSON.stringify(result,null,2));return;}
-  if(action==='transition'){const result=await controllerWorkerRequest('/v1/jobs/transition',{jobId:option('job-id',''),leaseId:option('lease-id',''),fencingToken:Number(option('fencing-token','0')),status:option('status','Running'),result:{summaryCode:option('summary-code','')||undefined,testsPassed:option('tests-passed','')==='true'?true:undefined,changedFilesCount:option('changed-files','')?Number(option('changed-files','')):undefined},failureCode:option('error-code','')||undefined});console.log(JSON.stringify(result,null,2));return;}
-  throw new Error('Worker commands: register | heartbeat [--job-id=...] | heartbeat-loop [--interval-seconds=30 --job-id=... --lease-id=... --fencing-token=...] | sync | claim | transition --job-id=... --lease-id=... --fencing-token=... --status=Running|Testing|Completed|Failed');
+  if(action==='policy'){console.log(JSON.stringify(await controllerWorkerRequest('/v1/policy/current',{}),null,2));return;}
+  if(action==='claim'){const current=await controllerWorkerRequest<{version:number}>('/v1/policy/current',{});const result=await controllerWorkerRequest('/v1/jobs/claim',{policyVersion:current.version,leaseMs:Number(option('lease-ms','60000'))});console.log(JSON.stringify(result,null,2));return;}
+  if(action==='transition'){const current=await controllerWorkerRequest<{version:number}>('/v1/policy/current',{});const result=await controllerWorkerRequest('/v1/jobs/transition',{jobId:option('job-id',''),leaseId:option('lease-id',''),fencingToken:Number(option('fencing-token','0')),policyVersion:current.version,status:option('status','Running'),result:{summaryCode:option('summary-code','')||undefined,testsPassed:option('tests-passed','')==='true'?true:undefined,changedFilesCount:option('changed-files','')?Number(option('changed-files','')):undefined},failureCode:option('error-code','')||undefined});console.log(JSON.stringify(result,null,2));return;}
+  throw new Error('Worker commands: register | heartbeat [--job-id=...] | heartbeat-loop [--interval-seconds=30 --job-id=... --lease-id=... --fencing-token=...] | policy | sync | claim | transition --job-id=... --lease-id=... --fencing-token=... --status=Running|Testing|Completed|Failed');
  }
  if(command==='gsc'){
   const subcommand=args[1]??'run';

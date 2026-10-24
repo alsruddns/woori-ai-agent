@@ -6,6 +6,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { load } from 'cheerio';
 import { config, finishRun, initDb, localeFor, saveChecks, saveFindings, saveAgentData, serviceFor, startRun, type Check, type Finding } from './core.js';
+import { getAgentPolicy, policyExecutionGate } from './agent-policy.js';
 
 export type ScheduleAction = 'http-smoke' | 'seo-sample' | 'localization-content' | 'weekly-regression-summary';
 export type ScheduleDefinition = { id: string; label: string; intervalMs: number; priority: number; action: ScheduleAction; enabled: boolean; timeoutMs: number; maxPages: number; catchUpGraceMs: number };
@@ -76,6 +77,7 @@ function appendEvent(db: Database.Database, input: { runId: string; scheduleId: 
 }
 
 export function schedulerTick(dbPath?: string, now = new Date(), controllerId = schedulerInstanceId) {
+  const policy=getAgentPolicy(dbPath);if(policy.emergencyStop||policy.mode==='PAUSED'||!policy.globalAutomationEnabled||!policy.global.scheduler) return { leader: false, queued: 0, skipped: 0, paused: true };
   const db = open(dbPath); const tx = db.transaction(() => {
     const lock = db.prepare("SELECT value FROM scheduler_meta WHERE key='leader' ").get() as {value:string}|undefined;
     if (lock) { const value = JSON.parse(lock.value) as { owner: string; expiresAt: string }; if (Date.parse(value.expiresAt) > now.getTime() && value.owner !== controllerId) return { leader: false, queued: 0, skipped: 0 }; }
@@ -139,7 +141,8 @@ export function claimScheduledRun(dbPath?: string, workerId = `scheduler-${os.ho
 
 function readOnlyRoutes(action: ScheduleAction, maxPages: number, scheduledFor:string, dbPath?:string) {
   const controls=new Map((initializeServiceControls(dbPath) as any[]).map(row=>[row.service,row]));
-  const services=config.services.filter(service=>SERVICES.has(service.id) && (action==='http-smoke'?controls.get(service.id)?.autoQa:action==='seo-sample'?controls.get(service.id)?.seo:Boolean(controls.get(service.id)?.localization || controls.get(service.id)?.improvementCandidates)));
+  const policy=getAgentPolicy(dbPath);
+  const services=config.services.filter(service=>{const servicePolicy=policy.services[service.id as keyof typeof policy.services];if(!SERVICES.has(service.id)||!servicePolicy?.enabled)return false;if(action==='http-smoke')return policy.global.httpMonitoring&&policy.global.qaAnalysis&&servicePolicy.monitoring&&Boolean(controls.get(service.id)?.autoQa);if(action==='seo-sample')return policy.global.seoAnalysis&&servicePolicy.seo&&Boolean(controls.get(service.id)?.seo);return policy.global.localizationCheck&&servicePolicy.localization&&Boolean(controls.get(service.id)?.localization||controls.get(service.id)?.improvementCandidates);});
   const urls:string[]=[];
   for(const service of services) {
     const routes=service.qaPaths??[];
@@ -200,6 +203,7 @@ async function executeAction(run: {runId:string;scheduleId:string;scheduledFor:s
   let stoppedForLatency=false;
   try {
     for(let i=0;i<urls.length;i++) {
+      const currentPolicy=getAgentPolicy(dbPath);if(currentPolicy.emergencyStop||currentPolicy.mode==='PAUSED'||!currentPolicy.globalAutomationEnabled||!currentPolicy.global.scheduler)throw Object.assign(new Error('Scheduled work stopped after Controller policy changed.'),{code:'POLICY_STOP'});
       if(Date.now()-Date.parse(run.startedAt??nowIso())>run.timeoutMs) throw Object.assign(new Error('Scheduled read-only action exceeded its time limit.'),{code:'SCHEDULE_TIMEOUT'});
       const result=await fetchScheduledPage(urls[i]!),check=result.check;
       check.service=serviceFor(check.url).id;
@@ -219,10 +223,11 @@ async function executeAction(run: {runId:string;scheduleId:string;scheduledFor:s
     const failed=findings.some(f=>f.severity==='Critical'),status=failed?'Failed':stoppedForLatency?'Blocked':'Completed';
     saveChecks(runId,checks); saveFindings(runId,findings); finishRun(runId,status,checks.length,findings.length,Math.max(0,urls.length-checks.length));
     return {status,summary:`Checked ${checks.length} read-only public routes; ${findings.length} rule-based findings${stoppedForLatency?'; remaining sample stopped after a slow response':''}. Browser JS, axe, Lighthouse and functional flows were not run.`};
-  } catch(error) { saveChecks(runId,checks); saveFindings(runId,findings); finishRun(runId,'Failed',checks.length,findings.length,Math.max(0,urls.length-checks.length)); throw error; }
+  } catch(error) { saveChecks(runId,checks); saveFindings(runId,findings); const policyStopped=error&&typeof error==='object'&&'code'in error&&(error as {code:unknown}).code==='POLICY_STOP';finishRun(runId,policyStopped?'Blocked':'Failed',checks.length,findings.length,Math.max(0,urls.length-checks.length));if(policyStopped)return{status:'Blocked',summary:`Stopped after policy update; ${Math.max(0,urls.length-checks.length)} URLs remain Not Covered.`};throw error; }
 }
 
 export async function runOneScheduledAction(dbPath?:string, workerId?:string) {
+  const gate=policyExecutionGate('scheduler',dbPath);if(!gate.allowed)throw new Error(gate.reason);
   if(process.env.WOORI_SCHEDULER_ENABLED!=='true'||process.env.PAID_AI_API_ENABLED!=='false'||process.env.AI_API_BUDGET_USD!=='0'||process.env.AI_AUTO_EXECUTION!=='false') throw new Error('Scheduled execution requires global opt-in and the explicit zero-cost AI policy.');
   if(!controllerIsAlive(dbPath)) throw new Error('Central Controller heartbeat is absent or stale; no offline scheduling or execution is allowed.');
   const lease=claimScheduledRun(dbPath,workerId); if(!lease) return {status:'Idle' as const};
@@ -298,10 +303,11 @@ function releaseSchedulerLeadership(dbPath?:string,owner=schedulerInstanceId) {
 export async function runSchedulerDaemon(options:{dbPath?:string;intervalMs?:number;workerId?:string;signal?:AbortSignal}={}) {
   if(process.env.WOORI_SCHEDULER_ENABLED!=='true') throw new Error('Scheduler is disabled. Set WOORI_SCHEDULER_ENABLED=true after reviewing local/systemd configuration.');
   if(process.env.PAID_AI_API_ENABLED!=='false'||process.env.AI_API_BUDGET_USD!=='0'||process.env.AI_AUTO_EXECUTION!=='false') throw new Error('Scheduler requires the explicit zero-cost AI policy environment.');
+  if(!getAgentPolicy(options.dbPath).global.scheduler)throw new Error('Controller policy has Scheduler disabled.');
   initializeScheduler(options.dbPath);
   const interval=Math.min(60_000,Math.max(5_000,options.intervalMs??15_000));
   try{while(!options.signal?.aborted) {
-    if(!controllerIsAlive(options.dbPath)){await new Promise<void>(resolve=>setTimeout(resolve,interval));continue;}
+    if(!controllerIsAlive(options.dbPath)||!policyExecutionGate('scheduler',options.dbPath).allowed){await new Promise<void>(resolve=>setTimeout(resolve,interval));continue;}
     const tick=schedulerTick(options.dbPath, new Date(),schedulerInstanceId);
     if(tick.leader) await runOneScheduledAction(options.dbPath,options.workerId??schedulerInstanceId);
     await new Promise<void>(resolve=>{const timer=setTimeout(resolve,interval);options.signal?.addEventListener('abort',()=>{clearTimeout(timer);resolve();},{once:true});});

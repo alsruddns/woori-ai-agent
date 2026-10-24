@@ -11,6 +11,7 @@ import {
 } from './distributed-queue.js';
 import type { ControllerWorkerPolicy, WorkerOs } from './distributed-queue.js';
 import { initializeScheduler, initializeServiceControls, recordControllerHeartbeat, recordWorkerHealthSnapshots, schedulerSnapshot } from './scheduler.js';
+import { getAgentPolicy, policyExecutionGate, recordWorkerPolicyAcknowledgement } from './agent-policy.js';
 
 const envTokens = () => {
   const raw = process.env.WOORI_CONTROLLER_WORKER_TOKENS;
@@ -88,19 +89,20 @@ export function createDistributedControllerServer(options: ControllerOptions = {
         if (req.url === '/v1/workers/register') result = registerControllerWorker({ ...input, workerId }, dbPath, policy);
         else if (req.url === '/v1/workers/heartbeat') { result = heartbeatControllerWorker({ ...input, workerId }, dbPath, policy); recordWorkerHealthSnapshots(dbPath); }
         else if (req.url === '/v1/monitor/snapshot') result = schedulerSnapshot(dbPath,Number.isSafeInteger(input.afterEventId)?Math.max(0,input.afterEventId):0);
+        else if (req.url === '/v1/policy/current') { const policy=getAgentPolicy(dbPath);recordWorkerPolicyAcknowledgement(workerId,policy.version,dbPath);result={version:policy.version,mode:policy.mode,emergencyStop:policy.emergencyStop,global:policy.global,services:policy.services,execution:{development:policyExecutionGate('development',dbPath),codex:policyExecutionGate('codex',dbPath),pr:policyExecutionGate('pr',dbPath),merge:policyExecutionGate('merge',dbPath),deploy:policyExecutionGate('deploy',dbPath)}}; }
         else if (req.url === '/v1/jobs/submit') result = submitControllerJob(input, dbPath);
         else if (req.url === '/v1/jobs/status') result = controllerJobStatuses(input.jobIds, dbPath);
-        else if (req.url === '/v1/jobs/claim') result = currentControllerLease(workerId, dbPath) ?? claimControllerJob(workerId, input.leaseMs, dbPath, policy);
+        else if (req.url === '/v1/jobs/claim') { const current=getAgentPolicy(dbPath); if(!Number.isSafeInteger(input.policyVersion)||input.policyVersion!==current.version)throw new Error(`POLICY_VERSION_STALE:${current.version}`); if(current.emergencyStop||current.mode==='PAUSED'||!current.globalAutomationEnabled)throw new Error(`POLICY_BLOCKED:${current.version}`); result = currentControllerLease(workerId, dbPath) ?? claimControllerJob(workerId, input.leaseMs, dbPath, policy); }
         else if (req.url === '/v1/jobs/approve-local') { respond(403, { error: 'operator_action_is_local_only' }); return; }
-        else if (req.url === '/v1/leases/renew') result = renewControllerLease({ ...input, workerId }, input.leaseMs, dbPath);
-        else if (req.url === '/v1/jobs/transition') result = transitionControllerJob({ ...input, workerId }, dbPath);
+        else if (req.url === '/v1/leases/renew') { const version=assertPolicyVersion(input,dbPath),current=getAgentPolicy(dbPath);if(current.emergencyStop||current.mode==='PAUSED')throw new Error(`POLICY_BLOCKED:${version}`);result = renewControllerLease({ ...input, workerId }, input.leaseMs, dbPath); }
+        else if (req.url === '/v1/jobs/transition') { const version=assertPolicyVersion(input,dbPath),current=getAgentPolicy(dbPath);if(current.emergencyStop||current.mode==='PAUSED')throw new Error(`POLICY_BLOCKED:${version}`);result = transitionControllerJob({ ...input, workerId }, dbPath); }
         else if (req.url === '/v1/leases/assert') result = { valid: Boolean(assertLease(input, workerId, dbPath)) };
         else { respond(404, { error: 'not_found' }); return; }
         const response = { requestId, result };
         respond(200, response);
       } catch (error) {
         const message = error instanceof Error ? error.message : 'request_failed';
-        const status = /credential|authentication|nonce|timestamp/i.test(message) ? 401 : /stale|expired|fencing|lease/i.test(message) ? 409 : 400;
+        const status = /credential|authentication|nonce|timestamp/i.test(message) ? 401 : /policy_blocked/i.test(message) ? 403 : /stale|expired|fencing|lease|policy_version/i.test(message) ? 409 : 400;
         respond(status, { error: message });
       }
     });
@@ -115,6 +117,7 @@ export function createDistributedControllerServer(options: ControllerOptions = {
 function assertLease(input: { jobId: string; fencingToken: number }, workerId: string, dbPath?: string) {
   return assertCurrentControllerLease({ jobId: input.jobId, workerId, fencingToken: input.fencingToken }, dbPath);
 }
+function assertPolicyVersion(input: { policyVersion?: number }, dbPath?:string) { const version=getAgentPolicy(dbPath).version;if(!Number.isSafeInteger(input.policyVersion)||input.policyVersion!==version)throw new Error(`POLICY_VERSION_STALE:${version}`);return version; }
 
 export async function controllerWorkerRequest<T>(endpoint: string, body: unknown, options: { workerId?: string; token?: string; timeoutMs?: number } = {}): Promise<T> {
   const workerId = options.workerId ?? process.env.WOORI_CONTROLLER_WORKER_ID ?? '';
