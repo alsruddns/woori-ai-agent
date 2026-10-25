@@ -1,1 +1,1 @@
-{"name":"@woori/dashboard","private":true,"version":"0.1.0","type":"module","scripts":{"dev":"vite --host 127.0.0.1","build":"vite build"}}
+{"name":"@woori/dashboard","private":true,"version":"0.1.0","type":"module","scripts":{"dev":"vite --host 127.0.0.1","build":"vite build"},"dependencies":{"@tanstack/react-virtual":"^3.14.22"}}

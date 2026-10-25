@@ -1,4 +1,5 @@
 import React from 'react';
+import{VirtualizedList}from'./VirtualizedList';
 
 type Workflow = Record<string, unknown>;
 type Readiness = {
@@ -66,12 +67,11 @@ export function DeploymentReadiness({ data }: { data?: Readiness }) {
       {item.lastKnownFailure && <p>최근 실패: {label(item.lastKnownFailure)} · Run {label(item.lastKnownFailureRunId)}</p>}
     </article>)}</div>
     <h3>배포 실행 이력</h3>
-    <div className="finding-list">{(data.records ?? []).map(item => <article key={String(item.deploymentKey)}>
+    <VirtualizedList items={data.records??[]} ariaLabel="배포 실행 이력" getItemKey={item=>String(item.deploymentKey)} height={560} estimateSize={120} virtualizeFrom={30} renderItem={(item:Workflow)=><article className="detail-row">
       <span className="state">{label(item.status)} · {label(item.target)}</span>
-      <div><b>{label(item.service)} · {item.prNumber ? `PR #${label(item.prNumber)}` : `Actions run ${label(item.runId)}`} · SHA {label(item.headSha)}</b>
-        {item.runUrl && <p><a href={String(item.runUrl)} target="_blank" rel="noreferrer">Actions run {label(item.runId)}</a></p>}
-        <p>{label(item.detail)}</p>
-      </div>
-    </article>)}{!(data.records ?? []).length && <div className="empty card">배포 실행 기록이 없습니다. 이 화면은 승인 또는 배포를 실행하지 않습니다.</div>}</div>
+      <b>{label(item.service)} · {item.prNumber?`PR #${label(item.prNumber)}`:`Actions run ${label(item.runId)}`} · SHA {label(item.headSha)}</b>
+      {item.runUrl&&<p><a href={String(item.runUrl)} target="_blank" rel="noreferrer">Actions run {label(item.runId)}</a></p>}
+      <p>{label(item.detail)}</p>
+    </article>}/>{!(data.records??[]).length&&<div className="empty card">배포 실행 기록이 없습니다. 이 화면은 승인 또는 배포를 실행하지 않습니다.</div>}
   </section>;
 }
