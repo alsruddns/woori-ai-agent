@@ -16,7 +16,7 @@ This phase adds Controller-backed project development locks, target selection, a
 | Docs | `LOCKED_CONFLICT` | Local `develop` is clean and equals remote SHA `0194542d7b09c4a5cb13f6c1677604aa1e6fa24e`, but two additional Phase 9D-4 CI worktrees exist. They were preserved. |
 | Home | `DISABLED` | Feature expansion is excluded. Its checkout has an untracked `.playwright-mcp/` path and is on a feature branch; the existing user work was preserved. |
 
-Git state cannot prove that another Codex session is absent. Clean trees are therefore not treated as proof of exclusive ownership. Unknown repository identity, remote SHA, or tree state fails closed.
+Git state cannot prove that another Codex session is absent. Clean trees are therefore not treated as proof of exclusive ownership. Unknown repository identity, remote SHA, or tree state fails closed. The Dashboard surfaces additional worktree paths and locks a project when the checkout is off `develop`, its HEAD differs from the confirmed remote `develop`, or other worktrees are present.
 
 ## Controller and worker enforcement
 

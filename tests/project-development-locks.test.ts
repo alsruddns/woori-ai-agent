@@ -9,7 +9,7 @@ import { verifyDevelopmentAuditChain } from '../apps/cli/src/development-audit.j
 
 const roots:string[]=[];
 function temp(){const root=fs.mkdtempSync(path.join(os.tmpdir(),'woori-project-lock-'));roots.push(root);return{root,controller:path.join(root,'controller.sqlite'),audit:path.join(root,'audit.sqlite')};}
-const repoStates=(overrides:Record<string,Partial<{repositoryVerified:boolean;dirtyFileCount:number;dirtyPaths:string[];observedCurrentBranch:string;writeLocked:boolean;lockReason:string}>>={})=>['home','calculator','tools','quiz','docs'].map(id=>({id,repositoryVerified:true,dirtyFileCount:0,dirtyPaths:[],observedCurrentBranch:'develop',writeLocked:false,...overrides[id]}));
+const repoStates=(overrides:Record<string,Partial<{repositoryVerified:boolean;dirtyFileCount:number;dirtyPaths:string[];observedCurrentBranch:string;extraWorktreePaths:string[];writeLocked:boolean;lockReason:string}>>={})=>['home','calculator','tools','quiz','docs'].map(id=>({id,repositoryVerified:true,dirtyFileCount:0,dirtyPaths:[],observedCurrentBranch:'develop',extraWorktreePaths:[],writeLocked:false,...overrides[id]}));
 afterEach(()=>{for(const root of roots.splice(0))fs.rmSync(root,{recursive:true,force:true});});
 
 describe('project development locks and selection',()=>{
@@ -32,6 +32,9 @@ describe('project development locks and selection',()=>{
   const result=changeProjectDevelopmentLock({projectId:'tools',action:'unlock',expectedVersion:before.version,actor:'test-admin',reason:'External work reviewed.',confirmExternalWorkComplete:true},{databasePath:files.controller,auditDatabasePath:files.audit,repositoryStates:states});
   expect(result.locks.projects.find(row=>row.projectId==='tools')?.state).toBe('LOCKED_CONFLICT');
   expect(result.locks.projects.find(row=>row.projectId==='tools')?.conflictingPaths).toEqual(states.find(row=>row.id==='tools')?.dirtyPaths);
+ });
+ it('lists additional worktree locations and locks the project for ownership review',()=>{
+  const files=temp(),states=repoStates({quiz:{extraWorktreePaths:['C:/Users/test/AppData/Temp/quiz-ci']}});const result=listProjectDevelopmentLocks({databasePath:files.controller,auditDatabasePath:files.audit,repositoryStates:states});const quiz=result.projects.find(row=>row.projectId==='quiz');expect(quiz?.state).toBe('LOCKED_CONFLICT');expect(quiz?.conflictingPaths).toContain('worktree:C:/Users/test/AppData/Temp/quiz-ci');
  });
  it('selects Quiz first and falls through to Docs when Quiz is locked; policy-off blocks every target',()=>{
   const files=temp();const state=listProjectDevelopmentLocks({databasePath:files.controller,auditDatabasePath:files.audit,repositoryStates:repoStates()});const gates=Object.fromEntries(['quiz','docs','tools','calculator'].map(projectId=>[projectId,{policyAllowed:true,codexEnabled:true,workerAvailable:true,sandboxReady:true,leaseValid:true,budgetAvailable:true,auditReady:true}])) as any;
