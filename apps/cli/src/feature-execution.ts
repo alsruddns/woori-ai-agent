@@ -169,6 +169,7 @@ export type ReleaseReadinessInput = {
   localeSource: string;
   localeSourceAuthoritative: boolean;
   locales: Record<string, { route: boolean; renderedHtml: boolean; uiStrings: boolean; inputErrorResultStrings: boolean; title: string; description: string; canonical: boolean; hreflang: string[]; xDefault: boolean; robotsVerified: boolean; sitemapContainsRoute: boolean; buildOrRenderEvidence: boolean }>;
+  evidence?: { validatorVersion?: string; commitSha?: string | null; fileHashes?: Record<string, string>; localeSourceEvidence?: string; routeEvidence?: string[]; seoEvidence?: string[]; sitemapEvidence?: string[]; auditChainValid?: boolean };
 };
 
 export function validateFeatureReleaseReadiness(input: ReleaseReadinessInput) {
@@ -188,7 +189,18 @@ export function validateFeatureReleaseReadiness(input: ReleaseReadinessInput) {
     if (!row.xDefault || !row.robotsVerified || !row.sitemapContainsRoute) failures.push(`${locale}: x-default, robots or sitemap evidence missing.`);
     if (!row.buildOrRenderEvidence) failures.push(`${locale}: build/render evidence missing.`);
   }
-  return { status: failures.length ? 'Not Ready' as const : 'Ready' as const, publicLocales: locales, localeSource: input.localeSource, evidenceBased: true, failures };
+  const checks: Record<string, { status: 'Verified' | 'Failed' | 'Missing Evidence' | 'Not Applicable'; reason?: string }> = {
+    localeSource: { status: input.localeSourceAuthoritative && Boolean(input.localeSource.trim()) ? 'Verified' : 'Missing Evidence', ...(input.localeSourceAuthoritative && input.localeSource.trim() ? {} : { reason: 'Authoritative public locale source was not provided.' }) },
+    routes: { status: locales.length && locales.every(locale => input.locales[locale]?.route && input.locales[locale]?.buildOrRenderEvidence) ? 'Verified' : 'Missing Evidence' },
+    localeUi: { status: locales.length && locales.every(locale => input.locales[locale]?.uiStrings && input.locales[locale]?.inputErrorResultStrings) ? 'Verified' : 'Failed' },
+    seo: { status: locales.length && locales.every(locale => input.locales[locale]?.title.trim() && input.locales[locale]?.description.trim() && input.locales[locale]?.canonical && input.locales[locale]?.hreflang.includes(locale) && input.locales[locale]?.hreflang.includes('x-default') && input.locales[locale]?.xDefault) ? 'Verified' : 'Failed' },
+    robots: { status: locales.length && locales.every(locale => input.locales[locale]?.robotsVerified) ? 'Verified' : 'Failed' },
+    sitemap: { status: locales.length && locales.every(locale => input.locales[locale]?.sitemapContainsRoute) ? 'Verified' : 'Missing Evidence' },
+    build: { status: locales.length && locales.every(locale => input.locales[locale]?.buildOrRenderEvidence) ? 'Verified' : 'Missing Evidence' },
+    security: { status: input.evidence?.fileHashes && Object.keys(input.evidence.fileHashes).length && input.evidence.commitSha ? 'Verified' : 'Missing Evidence' },
+    audit: { status: input.evidence?.auditChainValid ? 'Verified' : 'Missing Evidence' },
+  };
+  return { status: failures.length ? 'Not Ready' as const : 'Ready' as const, readiness: Object.values(checks).some(item => item.status === 'Missing Evidence' || item.status === 'Failed') ? 'Not Ready' as const : 'Ready' as const, checks, validatorVersion: input.evidence?.validatorVersion ?? 'fixture-release-readiness/1.0.0', commitSha: input.evidence?.commitSha ?? null, fileHashes: input.evidence?.fileHashes ?? {}, localeSourceEvidence: input.evidence?.localeSourceEvidence ?? input.localeSource, routeEvidence: input.evidence?.routeEvidence ?? [], seoEvidence: input.evidence?.seoEvidence ?? [], sitemapEvidence: input.evidence?.sitemapEvidence ?? [], publicLocales: locales, localeSource: input.localeSource, evidenceBased: true, failures };
 }
 
 export type RetryStopReason = 'same-error' | 'timeout' | 'policy-changed' | 'lease-expired' | 'usage-limit' | 'authentication' | 'attempt-limit' | null;

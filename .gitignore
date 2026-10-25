@@ -7,6 +7,7 @@ data/*.dpapi
 data/*credentials*.json
 data/development-executions/**
 data/development-worktrees/**
+artifacts/feature-execution/**
 reports/**
 !reports/.gitkeep
 playwright-report/
