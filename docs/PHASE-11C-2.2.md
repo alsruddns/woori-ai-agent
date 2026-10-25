@@ -34,7 +34,7 @@ Windows 임시 fixture에서 실제 Codex CLI를 정확히 1회 실행했다. CL
 - 실제 Codex fixture: 1회 실행, 위 독립 명령 통과
 - 무호출 재검증: `Revalidated`, Codex 호출 0회
 - 비용: 유료 API 요청 없음. ChatGPT 로그인 세션의 기존 구독 사용량은 소비될 수 있으며 잔여량은 확인되지 않음.
-- Ubuntu Actions: 이번 변경에 대한 새 Run은 아직 확인하지 않았다. push 이후 workflow 결과를 별도로 조회한다.
+- Ubuntu Actions: [Run 40171570717](https://github.com/alsruddns/woori-ai-agent/actions/runs/40171570717) succeeded on `b7f9d16a53e8381de4953041e2a6056efe321f94`. TypeScript/lint/tests/build와 Linux 패키지 검증이 통과했다. Hosted runner의 rootless Bubblewrap/cgroup 상태는 준비되지 않았다는 경고가 있었고, 이에 따라 Linux Codex 수정은 계속 비활성화다.
 
 ## 제한 및 다음 단계
 
