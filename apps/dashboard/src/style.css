@@ -136,7 +136,7 @@
 .help-trigger:hover,.help-trigger:focus-visible{border-color:#3159e8;background:#edf2ff;outline:2px solid #91a9ff;outline-offset:2px}
 .help-popover{position:absolute;right:0;top:calc(100% + 8px);z-index:60;display:grid;gap:8px;width:min(340px,calc(100vw - 48px));max-height:min(65vh,480px);overflow:auto;padding:13px 14px;border:1px solid #ccd5e3;border-radius:10px;background:#fff;color:#28364e;box-shadow:0 12px 34px #17233b30;font-size:11px;line-height:1.55;white-space:normal;overflow-wrap:anywhere;opacity:0;visibility:hidden;pointer-events:none;transform:translateY(-3px);transition:opacity .12s ease,transform .12s ease}
 .help-tip:hover .help-popover,.help-tip:focus-within .help-popover,.help-tip[data-open="true"] .help-popover{opacity:1;visibility:visible;pointer-events:auto;transform:translateY(0)}
-.help-tip[data-dismissed="true"]:focus-within:not(:hover) .help-popover{opacity:0;visibility:hidden;pointer-events:none}
+.help-tip[data-dismissed="true"] .help-popover{opacity:0;visibility:hidden;pointer-events:none}
 .service-policy-section>.select-field{margin:12px 0}
 .service-policy-banner{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:11px 13px;margin:10px 0;border-radius:9px;background:#f3f6fb;font-size:11px}
 .service-policy-banner b{font-size:14px}.service-policy-banner span{color:#627089}
