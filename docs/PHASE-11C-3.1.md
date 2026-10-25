@@ -10,7 +10,7 @@ This phase adds Controller-backed project development locks, target selection, a
 
 | Project | Default/resulting state | Evidence and action |
 |---|---|---|
-| Tools | `LOCKED_EXTERNAL_DEVELOPMENT` | The separate multilingual Codex task remains explicitly locked even though the observed working tree was clean. Unlock requires an authenticated administrator, a reason, and explicit confirmation that the other work is complete. |
+| Tools | `LOCKED_EXTERNAL_DEVELOPMENT` | The separate multilingual Codex task remains locked. The latest check found three dirty paths (`.github/workflows/deploy.yml`, `scripts/check-production-tools-smoke.mjs`, `tests/production-smoke.test.mjs`) plus two additional Phase 9D-4 CI worktrees. Current local/remote `develop` SHA was `21828f2421e3fc05ab1634ad7f596f8b9f893937`. Unlock requires an authenticated administrator, a reason, and explicit confirmation that the other work is complete; remaining dirty paths/worktrees continue to block development. |
 | Calculator | `LOCKED_POLICY` | Immutable source-edit policy during multilingual work. Its local checkout is on `main`, while the observed remote `develop` SHA is different. |
 | Quiz | `LOCKED_CONFLICT` | Local `develop` is clean and equals remote SHA `1053b8896a5363adbfb15d5061f27470b5094371`, but two additional Phase 9D-4 CI worktrees exist. Their ownership was not assumed and they were not removed. |
 | Docs | `LOCKED_CONFLICT` | Local `develop` is clean and equals remote SHA `0194542d7b09c4a5cb13f6c1677604aa1e6fa24e`, but two additional Phase 9D-4 CI worktrees exist. They were preserved. |
