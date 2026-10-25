@@ -37,6 +37,7 @@
     "build": "pnpm --dir apps/dashboard build",
     "agent:adsense-approval": "pnpm agent adsense-approval",
     "agent:development": "pnpm agent development status",
+    "agent:feature-factory": "pnpm agent feature-factory",
     "agent:scheduler": "pnpm agent scheduler"
   },
   "dependencies": {

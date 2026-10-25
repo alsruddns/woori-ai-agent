@@ -8,6 +8,7 @@ import{DistributedWorkers}from'./DistributedWorkers';
 import{LiveMonitor}from'./LiveMonitor';
 import{AgentControlCenter}from'./AgentControlCenter';
 import{DevelopmentHistory}from'./DevelopmentHistory';
+import{FeatureFactory}from'./FeatureFactory';
 import{adminFetch}from'./admin-api';
 
 type Run={id:string;started_at:string;finished_at?:string;mode:string;status:string;discovered_count:number;inspected_count:number;failed_count:number;not_covered_count:number};
@@ -27,10 +28,11 @@ function App(){
  const growth=(data?.growthIdeas??[]).flatMap(x=>x.payload?.candidates??[]).filter(x=>service==='all'||x.service===service).sort((a,b)=>String(a.priority).localeCompare(String(b.priority))).slice(0,12);
  return <main>
   <header><div className="mark">W</div><div><b>Woori AI Agent</b><small>무료 분석 · 로컬 SQLite 읽기 전용 대시보드</small></div><button className="refresh" onClick={load}>새로고침</button></header>
-  <nav className="dashboard-nav"><a href="#agent-control-center">Agent Control Center</a><a href="#development">Development</a><a href="#distributed-workers">Workers</a><a href="#agent-live-monitor">Agent Live Monitor</a><a href="#adsense-approval">AdSense Approval</a><a href="#gsc-seo">Search Console SEO</a><a href="#issue-section">Issues</a></nav>
+  <nav className="dashboard-nav"><a href="#agent-control-center">Agent Control Center</a><a href="#feature-factory">Feature Factory</a><a href="#development">Development</a><a href="#distributed-workers">Workers</a><a href="#agent-live-monitor">Agent Live Monitor</a><a href="#adsense-approval">AdSense Approval</a><a href="#gsc-seo">Search Console SEO</a><a href="#issue-section">Issues</a></nav>
   <section className="filters"><label>서비스<select value={service} onChange={e=>setService(e.target.value)}>{services.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label><label>Locale<select value={locale} onChange={e=>setLocale(e.target.value)}><option value="all">전체 locale</option>{['ko','en','ja','zh','es','pt-br','de','fr','vi','id','th','zh-tw','it','nl','hi'].map(x=><option key={x}>{x}</option>)}</select></label><span className="updated">{loading?'불러오는 중':data?`갱신 ${stamp(data.generatedAt)}`:'데이터 없음'}</span></section>
   {error&&<div className="error">대시보드 API 오류: {error}. `pnpm agent:dashboard` 실행 상태를 확인하세요.</div>}
   <AgentControlCenter/>
+  <FeatureFactory/>
   <DevelopmentHistory/>
   <section className="hero"><div><small>WOORI.TODAY · READ ONLY</small><h1>서비스 건강 현황</h1><p>{data?.latestRun?`${stamp(data.latestRun.started_at)} · ${data.latestRun.mode} · ${data.latestRun.status}`:'검사 실행 이력이 없습니다.'}</p>{data?.comparison&&<small>직전 실행 대비 검사 URL {data.comparison.inspectedDelta>=0?'+':''}{data.comparison.inspectedDelta}, 실패 {data.comparison.failedDelta>=0?'+':''}{data.comparison.failedDelta}</small>}</div><a className="button" href="https://www.woori.today" target="_blank" rel="noreferrer">운영 사이트 열기</a></section>
   <section className="stats">{[['발견 URL',totals?.discovered,`sitemap ${totals?.discoveredFromSitemaps??0} · 보조 경로 ${totals?.discoveredFromVerifiedRoutes??0}`],['최근 검사 URL',totals?.checked,`이번 실행 ${totals?.lastRunChecked??0}`],['미검사 URL',totals?.uninspected,'발견 URL과 실제 검사 URL은 별도 집계'],['신규 이슈',data?.issueWindows?.days7,`최근 30일 이슈 이벤트 ${data?.issueWindows?.days30??0}`]].map(([label,value,note])=><article key={String(label)}><small>{label}</small><h2>{value===undefined||value===null?'—':Number(value).toLocaleString()}</h2><p>{note}</p></article>)}</section>
