@@ -35,6 +35,8 @@ Relevant Quiz checks passed: `registry.test.ts`, `locale-catalog.test.ts`, `loca
 
 The existing `FEATURE-2026-000008` audit chain was valid before this phase and remains valid after appending a `DEVELOPMENT_BLOCKED` event. Its status remains `Triaged`; the event records the current preflight block without replacing the prior draft. Tools review was recorded as `DEV-2026-000075` with `TOOLS_COMPLETION_REVIEWED` and `TOOLS_LOCK_RETAINED` events. Both chains verify successfully.
 
+An audit command initially used the wrong local filename and created an ignored scratch database at `data/woori-ai-agent.sqlite` containing only a duplicate partial Tools review. The canonical audit database `data/woori-agent.sqlite` contains the verified records above and was not overwritten. The tool safety review rejected removal of the scratch database, so the three local scratch files (`.sqlite`, `-shm`, and `-wal`) remain and require manual cleanup if desired.
+
 No Codex model invocation, service Clone, GitHub push/PR, merge, deployment, or VPS change occurred. Windows status diagnostics reported Codex CLI 0.163.0 with ChatGPT authentication and MXC Ready, but these diagnostics do not override the Controller policy or exhausted local daily invocation limit. Linux code modification remains locked.
 
 ## Verification and next gate
