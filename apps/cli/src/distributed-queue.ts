@@ -18,7 +18,7 @@ export type ControllerJobInput = {
   idempotencyKey: string; title: string; evidence?: string; requiredOs?: WorkerOs | 'any';
   resourceKeys?: string[];
 };
-export type Lease = { jobId: string; workerId: string; leaseId: string; fencingToken: number; expiresAt: string; status: string };
+export type Lease = { jobId: string; workerId: string; leaseId: string; fencingToken: number; expiresAt: string; status: string;policyVersion:number|null };
 
 const SERVICES = new Set(['home', 'calculator', 'tools', 'docs', 'quiz']);
 const ACTIVE = ['Claimed', 'Running', 'Testing'] as const;
@@ -50,7 +50,7 @@ function openControllerDb(dbPath = defaultDbPath()) {
       resource_keys TEXT NOT NULL, title TEXT NOT NULL, evidence TEXT, status TEXT NOT NULL,
       worker_id TEXT, lease_id TEXT, fencing_token INTEGER, acquired_at TEXT, expires_at TEXT,
       last_renewed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, result_json TEXT,
-      failure_code TEXT, project_lock_version INTEGER
+      failure_code TEXT, project_lock_version INTEGER, policy_version INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_controller_jobs_claim ON controller_jobs(status,created_at);
     CREATE INDEX IF NOT EXISTS idx_controller_jobs_worker ON controller_jobs(worker_id,status);
@@ -67,6 +67,7 @@ function openControllerDb(dbPath = defaultDbPath()) {
   if (!workerColumns.some(column => column.name === 'allow_code_changes')) db.exec('ALTER TABLE controller_workers ADD COLUMN allow_code_changes INTEGER NOT NULL DEFAULT 0');
   const jobColumns = db.prepare('PRAGMA table_info(controller_jobs)').all() as Array<{ name: string }>;
   if (!jobColumns.some(column => column.name === 'project_lock_version')) db.exec('ALTER TABLE controller_jobs ADD COLUMN project_lock_version INTEGER');
+  if (!jobColumns.some(column => column.name === 'policy_version')) db.exec('ALTER TABLE controller_jobs ADD COLUMN policy_version INTEGER');
   return db;
 }
 
@@ -165,7 +166,7 @@ export function approveControllerJob(jobId: string, dbPath?: string) {
   }); const result = tx.immediate(); db.close(); return result;
 }
 
-export function claimControllerJob(workerId: string, leaseMs = 60_000, dbPath?: string, provisionedPolicy?: ControllerWorkerPolicy, projectGuard?: { lockVersion:number; availableProjects:string[] }): Lease | null {
+export function claimControllerJob(workerId: string, leaseMs = 60_000, dbPath?: string, provisionedPolicy?: ControllerWorkerPolicy, projectGuard?: { lockVersion:number; availableProjects:string[];policyVersion?:number }): Lease | null {
   const db = openControllerDb(dbPath); const stamp = Date.now(); const tx = db.transaction(() => {
     const worker = db.prepare('SELECT * FROM controller_workers WHERE worker_id=?').get(workerId) as any;
     const activeWorkerJob = db.prepare("SELECT 1 FROM controller_jobs WHERE worker_id=? AND status IN ('Claimed','Running','Testing') LIMIT 1").get(workerId);
@@ -174,6 +175,7 @@ export function claimControllerJob(workerId: string, leaseMs = 60_000, dbPath?: 
     for (const job of jobs) {
       if(job.work_class==='code_change'){
         if(!projectGuard||!Array.isArray(projectGuard.availableProjects)||!projectGuard.availableProjects.includes(job.service))continue;
+        if(!Number.isSafeInteger(projectGuard.policyVersion))continue;
         const lockTable=db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_lock_meta'").get();if(!lockTable)continue;
         const currentVersion=(db.prepare('SELECT version FROM project_lock_meta WHERE id=1').get() as {version:number}|undefined)?.version;if(currentVersion!==projectGuard.lockVersion)continue;
       }
@@ -188,12 +190,12 @@ export function claimControllerJob(workerId: string, leaseMs = 60_000, dbPath?: 
       const leaseId = randomUUID(); const nextToken = Number((db.prepare("SELECT value FROM controller_meta WHERE key='fencing_counter'").get() as { value: string }).value) + 1;
       const expiresAt = new Date(stamp + Math.max(10_000, Math.min(leaseMs, 5 * 60_000))).toISOString();
       db.prepare("UPDATE controller_meta SET value=? WHERE key='fencing_counter'").run(String(nextToken));
-      db.prepare("UPDATE controller_jobs SET status='Claimed',worker_id=?,lease_id=?,fencing_token=?,acquired_at=?,expires_at=?,last_renewed_at=?,updated_at=?,project_lock_version=? WHERE global_job_id=? AND status='Ready'")
-        .run(workerId, leaseId, nextToken, new Date(stamp).toISOString(), expiresAt, new Date(stamp).toISOString(), nowIso(), job.work_class === 'code_change' ? projectGuard!.lockVersion : null, job.global_job_id);
+      db.prepare("UPDATE controller_jobs SET status='Claimed',worker_id=?,lease_id=?,fencing_token=?,acquired_at=?,expires_at=?,last_renewed_at=?,updated_at=?,project_lock_version=?,policy_version=? WHERE global_job_id=? AND status='Ready'")
+        .run(workerId, leaseId, nextToken, new Date(stamp).toISOString(), expiresAt, new Date(stamp).toISOString(), nowIso(), job.work_class === 'code_change' ? projectGuard!.lockVersion : null, projectGuard?.policyVersion??null, job.global_job_id);
       const changed = db.prepare('SELECT changes() n').get() as { n: number }; if (changed.n !== 1) return null;
       db.prepare("UPDATE controller_workers SET current_job_id=?,state='Busy',execution_status='Claimed',updated_at=? WHERE worker_id=?").run(job.global_job_id, nowIso(), workerId);
       event(db, job.global_job_id, workerId, 'claimed', nextToken, { leaseId, expiresAt });
-      return { jobId: job.global_job_id, workerId, leaseId, fencingToken: nextToken, expiresAt, status: 'Claimed' } as Lease;
+       return { jobId: job.global_job_id, workerId, leaseId, fencingToken: nextToken, expiresAt, status: 'Claimed',policyVersion:projectGuard?.policyVersion??null } as Lease;
     }
     return null;
   });
@@ -202,7 +204,7 @@ export function claimControllerJob(workerId: string, leaseMs = 60_000, dbPath?: 
 
 export function currentControllerLease(workerId: string, dbPath?: string): Lease | null {
   const db = openControllerDb(dbPath);
-  const lease = db.prepare("SELECT global_job_id AS jobId,worker_id AS workerId,lease_id AS leaseId,fencing_token AS fencingToken,expires_at AS expiresAt,status FROM controller_jobs WHERE worker_id=? AND status IN ('Claimed','Running','Testing') ORDER BY acquired_at DESC LIMIT 1").get(workerId) as Lease | undefined;
+  const lease = db.prepare("SELECT global_job_id AS jobId,worker_id AS workerId,lease_id AS leaseId,fencing_token AS fencingToken,expires_at AS expiresAt,status,policy_version AS policyVersion FROM controller_jobs WHERE worker_id=? AND status IN ('Claimed','Running','Testing') ORDER BY acquired_at DESC LIMIT 1").get(workerId) as Lease | undefined;
   db.close(); return lease && Date.parse(lease.expiresAt) > Date.now() ? lease : null;
 }
 
@@ -213,11 +215,12 @@ export function workerMatchesControllerPolicy(workerId: string, policy: Controll
   return Boolean(worker && worker.os === policy.os && Boolean(worker.allow_code_changes) === policy.allowCodeChanges);
 }
 
-export function renewControllerLease(input: { jobId: string; workerId: string; leaseId: string; fencingToken: number }, leaseMs = 60_000, dbPath?: string) {
+export function renewControllerLease(input: { jobId: string; workerId: string; leaseId: string; fencingToken: number;policyVersion?:number|null }, leaseMs = 60_000, dbPath?: string) {
   const db = openControllerDb(dbPath); const tx = db.transaction(() => {
-    const job = db.prepare('SELECT status,expires_at,work_class,service,project_lock_version FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND lease_id=? AND fencing_token=?').get(input.jobId, input.workerId, input.leaseId, input.fencingToken) as { status: string; expires_at: string; work_class?: string; service?: string; project_lock_version?: number | null } | undefined;
+    const job = db.prepare('SELECT status,expires_at,work_class,service,project_lock_version,policy_version FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND lease_id=? AND fencing_token=?').get(input.jobId, input.workerId, input.leaseId, input.fencingToken) as { status: string; expires_at: string; work_class?: string; service?: string; project_lock_version?: number | null;policy_version?:number|null } | undefined;
     if (!job || !ACTIVE.includes(job.status as typeof ACTIVE[number]) && job.status !== 'Claimed') throw new Error('Lease or fencing token is stale.');
     assertProjectLockVersion(db, job);
+    if(job.work_class==='code_change'&&(!Number.isSafeInteger(input.policyVersion)||job.policy_version!==input.policyVersion))throw new Error(`POLICY_VERSION_STALE:${job.policy_version??'Unknown'}`);
     if (Date.parse(job.expires_at) <= Date.now()) throw new Error('Expired leases cannot be renewed. Operator recovery evidence is required.');
     const stamp = nowIso(), expiresAt = new Date(Date.now() + Math.max(10_000, Math.min(leaseMs, 5 * 60_000))).toISOString();
     db.prepare('UPDATE controller_jobs SET expires_at=?,last_renewed_at=?,updated_at=? WHERE global_job_id=?').run(expiresAt, stamp, stamp, input.jobId);
@@ -226,7 +229,7 @@ export function renewControllerLease(input: { jobId: string; workerId: string; l
   }); try { return tx.immediate(); } finally { db.close(); }
 }
 
-export function transitionControllerJob(input: { jobId: string; workerId: string; leaseId: string; fencingToken: number; status: 'Running' | 'Testing' | 'Completed' | 'Failed'; result?: unknown; failureCode?: string }, dbPath?: string) {
+export function transitionControllerJob(input: { jobId: string; workerId: string; leaseId: string; fencingToken: number; policyVersion?:number|null;status: 'Running' | 'Testing' | 'Completed' | 'Failed'; result?: unknown; failureCode?: string }, dbPath?: string) {
   if (input.failureCode && !/^[A-Z0-9_.-]{1,64}$/i.test(input.failureCode)) throw new Error('failureCode must be a non-sensitive machine code.');
   const rawResult = input.result && typeof input.result === 'object' ? input.result as Record<string, unknown> : {};
   const safeResult = {
@@ -235,9 +238,10 @@ export function transitionControllerJob(input: { jobId: string; workerId: string
     summaryCode: typeof rawResult.summaryCode === 'string' && /^[A-Z0-9_.-]{1,64}$/i.test(rawResult.summaryCode) ? rawResult.summaryCode : undefined,
   };
   const db = openControllerDb(dbPath); const tx = db.transaction(() => {
-    const job = db.prepare('SELECT status,expires_at,work_class,service,project_lock_version FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND lease_id=? AND fencing_token=?').get(input.jobId, input.workerId, input.leaseId, input.fencingToken) as { status: string; expires_at: string; work_class?: string; service?: string; project_lock_version?: number | null } | undefined;
+    const job = db.prepare('SELECT status,expires_at,work_class,service,project_lock_version,policy_version FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND lease_id=? AND fencing_token=?').get(input.jobId, input.workerId, input.leaseId, input.fencingToken) as { status: string; expires_at: string; work_class?: string; service?: string; project_lock_version?: number | null;policy_version?:number|null } | undefined;
     if (!job || Date.parse(job.expires_at) <= Date.now()) throw new Error('Stale or expired fencing token; transition rejected.');
     assertProjectLockVersion(db, job);
+    if(job.work_class==='code_change'&&(!Number.isSafeInteger(input.policyVersion)||job.policy_version!==input.policyVersion))throw new Error(`POLICY_VERSION_STALE:${job.policy_version??'Unknown'}`);
     const allowed: Record<string, string[]> = { Claimed: ['Running', 'Testing', 'Completed', 'Failed'], Running: ['Testing', 'Completed', 'Failed'], Testing: ['Completed', 'Failed'] };
     if (!allowed[job.status]?.includes(input.status)) throw new Error(`Invalid job transition ${job.status} -> ${input.status}.`);
     db.prepare('UPDATE controller_jobs SET status=?,result_json=?,failure_code=?,updated_at=? WHERE global_job_id=? AND fencing_token=?').run(input.status, Object.values(safeResult).some(value => value !== undefined) ? JSON.stringify(safeResult) : null, input.failureCode ?? null, nowIso(), input.jobId, input.fencingToken);
@@ -247,8 +251,8 @@ export function transitionControllerJob(input: { jobId: string; workerId: string
   }); try { return tx.immediate(); } finally { db.close(); }
 }
 
-export function assertCurrentControllerLease(input: { jobId: string; workerId: string; fencingToken: number }, dbPath?: string) {
-  const db = openControllerDb(dbPath); let row:({ok:number;work_class?:string;service?:string;project_lock_version?:number|null}|undefined); try { row = db.prepare("SELECT 1 ok,work_class,service,project_lock_version FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND fencing_token=? AND status IN ('Claimed','Running','Testing') AND expires_at>? ").get(input.jobId, input.workerId, input.fencingToken, nowIso()) as typeof row; if(row)assertProjectLockVersion(db,row); } finally { db.close(); }
+export function assertCurrentControllerLease(input: { jobId: string; workerId: string; fencingToken: number;leaseId?:string;service?:string;policyVersion?:number;requireCodeChange?:boolean }, dbPath?: string) {
+  const db = openControllerDb(dbPath); let row:({ok:number;work_class?:string;service?:string;project_lock_version?:number|null;policy_version?:number|null}|undefined); try { row = db.prepare("SELECT 1 ok,work_class,service,project_lock_version,policy_version FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND fencing_token=? AND (? IS NULL OR lease_id=?) AND (? IS NULL OR service=?) AND status IN ('Claimed','Running','Testing') AND expires_at>? ").get(input.jobId, input.workerId, input.fencingToken, input.leaseId??null,input.leaseId??null,input.service??null,input.service??null,nowIso()) as typeof row; if(row){assertProjectLockVersion(db,row);if(input.requireCodeChange&&row.work_class!=='code_change')throw new Error('CODE_CHANGE_LEASE_REQUIRED');if(input.policyVersion!==undefined&&row.policy_version!==input.policyVersion)throw new Error(`POLICY_VERSION_STALE:${row.policy_version??'Unknown'}`);} } finally { db.close(); }
   if (!row) throw new Error('Current fencing token is not valid; external side effect blocked.'); return true;
 }
 
@@ -276,7 +280,7 @@ export function recordControllerNonce(workerId: string, nonce: string, timestamp
 export function controllerDashboardSnapshot(dbPath?: string, staleAfterMs = 45_000) {
   const db = openControllerDb(dbPath); const now = Date.now();
   const workers = (db.prepare('SELECT worker_id AS workerId,os,host_label AS hostLabel,capabilities,codex_cli_status AS codexCliStatus,chatgpt_login_status AS chatgptLoginStatus,sandbox_status AS sandboxStatus,cpu_count AS cpuCount,available_memory_bytes AS availableMemoryBytes,allow_code_changes AS allowCodeChanges,heartbeat_at AS heartbeatAt,current_job_id AS currentJobId,execution_status AS executionStatus,last_error_code AS lastErrorCode,state FROM controller_workers ORDER BY worker_id').all() as any[]).map(worker => ({ ...worker, allowCodeChanges: Boolean(worker.allowCodeChanges), capabilities: JSON.parse(worker.capabilities), state: worker.state === 'Disabled' ? 'Disabled' : now - Date.parse(worker.heartbeatAt) > staleAfterMs ? 'Offline' : worker.state }));
-  const jobs = db.prepare('SELECT global_job_id AS globalJobId,local_task_id AS localTaskId,service,kind,work_class AS workClass,required_os AS requiredOs,title,status,worker_id AS workerId,lease_id AS leaseId,fencing_token AS fencingToken,acquired_at AS acquiredAt,expires_at AS expiresAt,last_renewed_at AS lastRenewedAt,created_at AS createdAt,updated_at AS updatedAt,failure_code AS failureCode FROM controller_jobs ORDER BY created_at DESC LIMIT 200').all() as any[];
+   const jobs = db.prepare('SELECT global_job_id AS globalJobId,local_task_id AS localTaskId,service,kind,work_class AS workClass,required_os AS requiredOs,title,status,worker_id AS workerId,lease_id AS leaseId,fencing_token AS fencingToken,acquired_at AS acquiredAt,expires_at AS expiresAt,last_renewed_at AS lastRenewedAt,created_at AS createdAt,updated_at AS updatedAt,failure_code AS failureCode,project_lock_version AS projectLockVersion,policy_version AS policyVersion FROM controller_jobs ORDER BY created_at DESC LIMIT 200').all() as any[];
   const events = db.prepare('SELECT id,global_job_id AS globalJobId,worker_id AS workerId,event,fencing_token AS fencingToken,detail,created_at AS createdAt FROM controller_events ORDER BY id DESC LIMIT 200').all() as any[];
   const workerFresh = workers.filter(worker => worker.state !== 'Offline' && worker.state !== 'Disabled').length;
   db.close(); return { controller: 'Local SQLite Controller', configured: true, workerRegistration: workers.length ? 'Configured' : 'Not Configured', online: workerFresh > 0, checkedAt: nowIso(), workers, jobs, events, counts: { workers: workers.length, onlineWorkers: workerFresh, queued: jobs.filter(job => ['Discovered', 'Ready'].includes(job.status)).length, active: jobs.filter(job => ACTIVE.includes(job.status as typeof ACTIVE[number])).length, completed: jobs.filter(job => job.status === 'Completed').length, failed: jobs.filter(job => job.status === 'Failed').length } };
@@ -286,6 +290,6 @@ export function controllerJobStatuses(jobIds: string[], dbPath?: string) {
   if (!Array.isArray(jobIds) || jobIds.length > 200 || jobIds.some(id => typeof id !== 'string' || id.length > 80)) throw new Error('Invalid status query.');
   if (!jobIds.length) return [];
   const db = openControllerDb(dbPath); const placeholders = jobIds.map(() => '?').join(',');
-  const rows = db.prepare(`SELECT global_job_id AS globalJobId,status,worker_id AS workerId,fencing_token AS fencingToken,expires_at AS expiresAt,updated_at AS updatedAt,service,work_class AS workClass,project_lock_version AS projectLockVersion FROM controller_jobs WHERE global_job_id IN (${placeholders})`).all(...jobIds);
+   const rows = db.prepare(`SELECT global_job_id AS globalJobId,status,worker_id AS workerId,lease_id AS leaseId,fencing_token AS fencingToken,expires_at AS expiresAt,updated_at AS updatedAt,service,work_class AS workClass,project_lock_version AS projectLockVersion,policy_version AS policyVersion FROM controller_jobs WHERE global_job_id IN (${placeholders})`).all(...jobIds);
   db.close(); return rows;
 }

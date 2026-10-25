@@ -18,7 +18,7 @@ function worker(workerId: string, osName: 'windows' | 'linux' = 'windows') {
 function register(workerId: string, osName: 'windows' | 'linux' = 'windows', file = dbPath()) {
  return registerControllerWorker(worker(workerId, osName), file, {os:osName,allowCodeChanges:osName==='windows'});
 }
-function claimCodeJob(workerId:string,leaseMs:number,file:string,availableProjects=['tools','docs','quiz','home']){const db=new Database(file);db.exec("CREATE TABLE IF NOT EXISTS project_lock_meta(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);INSERT OR IGNORE INTO project_lock_meta(id,version) VALUES(1,1);CREATE TABLE IF NOT EXISTS project_development_locks(project_id TEXT PRIMARY KEY,state TEXT NOT NULL);INSERT OR IGNORE INTO project_development_locks VALUES('tools','AVAILABLE'),('docs','AVAILABLE'),('quiz','AVAILABLE'),('home','AVAILABLE')");db.close();return claimControllerJob(workerId,leaseMs,file,undefined,{lockVersion:1,availableProjects});}
+function claimCodeJob(workerId:string,leaseMs:number,file:string,availableProjects=['tools','docs','quiz','home']){const db=new Database(file);db.exec("CREATE TABLE IF NOT EXISTS project_lock_meta(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);INSERT OR IGNORE INTO project_lock_meta(id,version) VALUES(1,1);CREATE TABLE IF NOT EXISTS project_development_locks(project_id TEXT PRIMARY KEY,state TEXT NOT NULL);INSERT OR IGNORE INTO project_development_locks VALUES('tools','AVAILABLE'),('docs','AVAILABLE'),('quiz','AVAILABLE'),('home','AVAILABLE')");db.close();return claimControllerJob(workerId,leaseMs,file,undefined,{lockVersion:1,availableProjects,policyVersion:1});}
 function request(url: string, token: string, workerId: string, nonce = crypto.randomUUID(), body: unknown = worker(workerId)) {
  return fetch(url, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-woori-worker-id': workerId, 'x-woori-timestamp': String(Date.now()), 'x-woori-nonce': nonce, 'x-woori-request-id': crypto.randomUUID() }, body: JSON.stringify(body) });
 }
@@ -50,9 +50,9 @@ describe('distributed Controller lease safety', () => {
   const submitted=submitControllerJob({service:'quiz',kind:'feature',workClass:'code_change',requiredOs:'windows',idempotencyKey:'quiz-lock-guard',title:'Quiz feature'},file);
   approveControllerJob(submitted.globalJobId,file);
   const db=new Database(file);db.exec("CREATE TABLE project_lock_meta(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);INSERT INTO project_lock_meta VALUES(1,2);CREATE TABLE project_development_locks(project_id TEXT PRIMARY KEY,state TEXT NOT NULL);INSERT INTO project_development_locks VALUES('quiz','AVAILABLE')");db.close();
-  expect(claimControllerJob('worker-win-lock',60_000,file,undefined,{lockVersion:1,availableProjects:['quiz']})).toBeNull();
-  expect(claimControllerJob('worker-win-lock',60_000,file,undefined,{lockVersion:2,availableProjects:['docs']})).toBeNull();
-  expect(claimControllerJob('worker-win-lock',60_000,file,undefined,{lockVersion:2,availableProjects:['quiz']})).toMatchObject({jobId:submitted.globalJobId});
+  expect(claimControllerJob('worker-win-lock',60_000,file,undefined,{lockVersion:1,availableProjects:['quiz'],policyVersion:1})).toBeNull();
+  expect(claimControllerJob('worker-win-lock',60_000,file,undefined,{lockVersion:2,availableProjects:['docs'],policyVersion:1})).toBeNull();
+  expect(claimControllerJob('worker-win-lock',60_000,file,undefined,{lockVersion:2,availableProjects:['quiz'],policyVersion:1})).toMatchObject({jobId:submitted.globalJobId});
  });
 
  it('invalidates active code-change leases after any project lock version change', () => {
@@ -62,7 +62,7 @@ describe('distributed Controller lease safety', () => {
   const db=new Database(file);db.prepare('UPDATE project_lock_meta SET version=version+1 WHERE id=1').run();db.close();
   expect(()=>renewControllerLease(lease,60_000,file)).toThrow(/PROJECT_LOCK_VERSION_STALE/);
   expect(()=>transitionControllerJob({...lease,status:'Failed'},file)).toThrow(/PROJECT_LOCK_VERSION_STALE/);
-  expect(()=>assertCurrentControllerLease(lease,file)).toThrow(/PROJECT_LOCK_VERSION_STALE/);
+  expect(()=>assertCurrentControllerLease({...lease,policyVersion:lease.policyVersion??undefined},file)).toThrow(/PROJECT_LOCK_VERSION_STALE/);
  });
 
  it('honors overlapping repository/path resource locks across service jobs', () => {
@@ -93,7 +93,7 @@ describe('distributed Controller lease safety', () => {
   const lease = claimCodeJob('worker-win-11',60_000,file)!;
   const db = new Database(file); db.prepare('UPDATE controller_jobs SET expires_at=? WHERE global_job_id=?').run(new Date(Date.now() - 1_000).toISOString(), lease.jobId); db.close();
   expect(claimCodeJob('worker-win-12',60_000,file)).toBeNull();
-  expect(() => renewControllerLease({ jobId: lease.jobId, workerId: lease.workerId, leaseId: lease.leaseId, fencingToken: lease.fencingToken }, 60_000, file)).toThrow(/Expired leases/i);
+  expect(() => renewControllerLease(lease, 60_000, file)).toThrow(/Expired leases/i);
   expect(() => recoverExpiredControllerJob({ jobId: lease.jobId, processTerminated: false, verifiedBy: '', evidence: '' }, file)).toThrow(/termination evidence/i);
   recoverExpiredControllerJob({ jobId: lease.jobId, processTerminated: true, verifiedBy: 'local-operator', evidence: 'Worker process tree and host were checked after lease expiry.' }, file);
   const replacement = claimCodeJob('worker-win-12',60_000,file)!;
