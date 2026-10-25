@@ -9,6 +9,7 @@ import{LiveMonitor}from'./LiveMonitor';
 import{AgentControlCenter}from'./AgentControlCenter';
 import{DevelopmentHistory}from'./DevelopmentHistory';
 import{FeatureFactory}from'./FeatureFactory';
+import{ProjectDevelopment}from'./ProjectDevelopment';
 import{adminFetch}from'./admin-api';
 
 type Run={id:string;started_at:string;finished_at?:string;mode:string;status:string;discovered_count:number;inspected_count:number;failed_count:number;not_covered_count:number};
@@ -32,6 +33,7 @@ function App(){
   <section className="filters"><label>서비스<select value={service} onChange={e=>setService(e.target.value)}>{services.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label><label>Locale<select value={locale} onChange={e=>setLocale(e.target.value)}><option value="all">전체 locale</option>{['ko','en','ja','zh','es','pt-br','de','fr','vi','id','th','zh-tw','it','nl','hi'].map(x=><option key={x}>{x}</option>)}</select></label><span className="updated">{loading?'불러오는 중':data?`갱신 ${stamp(data.generatedAt)}`:'데이터 없음'}</span></section>
   {error&&<div className="error">대시보드 API 오류: {error}. `pnpm agent:dashboard` 실행 상태를 확인하세요.</div>}
   <AgentControlCenter/>
+  <ProjectDevelopment/>
   <FeatureFactory/>
   <DevelopmentHistory/>
   <section className="hero"><div><small>WOORI.TODAY · READ ONLY</small><h1>서비스 건강 현황</h1><p>{data?.latestRun?`${stamp(data.latestRun.started_at)} · ${data.latestRun.mode} · ${data.latestRun.status}`:'검사 실행 이력이 없습니다.'}</p>{data?.comparison&&<small>직전 실행 대비 검사 URL {data.comparison.inspectedDelta>=0?'+':''}{data.comparison.inspectedDelta}, 실패 {data.comparison.failedDelta>=0?'+':''}{data.comparison.failedDelta}</small>}</div><a className="button" href="https://www.woori.today" target="_blank" rel="noreferrer">운영 사이트 열기</a></section>

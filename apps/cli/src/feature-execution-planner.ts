@@ -1,6 +1,7 @@
 import { getAgentPolicy } from './agent-policy.js';
 import { listFeatureFactoryData } from './feature-factory.js';
 import { planFeatureExecution } from './feature-execution.js';
+import { listProjectDevelopmentLocks } from './project-development-locks.js';
 
 export function buildFeatureExecutionPlan(displayJobId: string, lease: { workerId: string; leaseId: string; fencingToken: number; expiresAt: string } | null, dbPath?: string) {
   const data = listFeatureFactoryData(dbPath);
@@ -36,6 +37,8 @@ export function buildFeatureExecutionPlan(displayJobId: string, lease: { workerI
   if (!policy.global.autonomousFeatureDevelopment || !policy.global.codexExecution) reasons.push('Global autonomous development and Codex execution remain locked OFF.');
   if (spec.specification.project === 'calculator') reasons.push('Calculator source modification lock is active.');
   const service = spec.specification.project as keyof typeof policy.services;
+  const projectLock = listProjectDevelopmentLocks({ databasePath: dbPath }).projects.find((item) => item.projectId === service);
+  if (!projectLock || projectLock.state !== 'AVAILABLE') reasons.push(`PROJECT_LOCKED:${projectLock?.state ?? 'LOCKED_UNVERIFIED'}`);
   if (!policy.services[service]?.featureDevelopment || !policy.services[service]?.codex) reasons.push('Service development/Codex policy is disabled.');
   if (process.platform !== 'win32') reasons.push('Linux source modification remains disabled pending sandbox verification.');
   return { ...generated, status: reasons.length ? 'Blocked' as const : 'Planned' as const, reasons: [...new Set(reasons)], executionAllowed: false, fixtureOnlyExecutionSupported: true };

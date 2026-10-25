@@ -50,7 +50,7 @@ function openControllerDb(dbPath = defaultDbPath()) {
       resource_keys TEXT NOT NULL, title TEXT NOT NULL, evidence TEXT, status TEXT NOT NULL,
       worker_id TEXT, lease_id TEXT, fencing_token INTEGER, acquired_at TEXT, expires_at TEXT,
       last_renewed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, result_json TEXT,
-      failure_code TEXT
+      failure_code TEXT, project_lock_version INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_controller_jobs_claim ON controller_jobs(status,created_at);
     CREATE INDEX IF NOT EXISTS idx_controller_jobs_worker ON controller_jobs(worker_id,status);
@@ -65,7 +65,19 @@ function openControllerDb(dbPath = defaultDbPath()) {
   `);
   const workerColumns = db.prepare('PRAGMA table_info(controller_workers)').all() as Array<{ name: string }>;
   if (!workerColumns.some(column => column.name === 'allow_code_changes')) db.exec('ALTER TABLE controller_workers ADD COLUMN allow_code_changes INTEGER NOT NULL DEFAULT 0');
+  const jobColumns = db.prepare('PRAGMA table_info(controller_jobs)').all() as Array<{ name: string }>;
+  if (!jobColumns.some(column => column.name === 'project_lock_version')) db.exec('ALTER TABLE controller_jobs ADD COLUMN project_lock_version INTEGER');
   return db;
+}
+
+function assertProjectLockVersion(db: Database.Database, job: { work_class?: string; service?: string; project_lock_version?: number | null }) {
+  if (job.work_class !== 'code_change') return;
+  const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_lock_meta'").get();
+  if (!table) throw new Error('PROJECT_LOCK_UNVERIFIED');
+  const current = (db.prepare('SELECT version FROM project_lock_meta WHERE id=1').get() as { version: number } | undefined)?.version;
+  if (!current || job.project_lock_version !== current) throw new Error(`PROJECT_LOCK_VERSION_STALE:${current ?? 'Unknown'}`);
+  const saved = db.prepare('SELECT state FROM project_development_locks WHERE project_id=?').get(job.service) as { state: string } | undefined;
+  if (saved && saved.state !== 'AVAILABLE') throw new Error(`PROJECT_LOCKED:${job.service}`);
 }
 
 function validateWorkerInput(input: ControllerWorkerInput) {
@@ -153,13 +165,18 @@ export function approveControllerJob(jobId: string, dbPath?: string) {
   }); const result = tx.immediate(); db.close(); return result;
 }
 
-export function claimControllerJob(workerId: string, leaseMs = 60_000, dbPath?: string, provisionedPolicy?: ControllerWorkerPolicy): Lease | null {
+export function claimControllerJob(workerId: string, leaseMs = 60_000, dbPath?: string, provisionedPolicy?: ControllerWorkerPolicy, projectGuard?: { lockVersion:number; availableProjects:string[] }): Lease | null {
   const db = openControllerDb(dbPath); const stamp = Date.now(); const tx = db.transaction(() => {
     const worker = db.prepare('SELECT * FROM controller_workers WHERE worker_id=?').get(workerId) as any;
     const activeWorkerJob = db.prepare("SELECT 1 FROM controller_jobs WHERE worker_id=? AND status IN ('Claimed','Running','Testing') LIMIT 1").get(workerId);
     if (!worker || worker.state === 'Disabled' || worker.available_memory_bytes < MIN_WORKER_MEMORY_BYTES || Date.parse(worker.heartbeat_at) < stamp - 45_000 || worker.current_job_id || activeWorkerJob || provisionedPolicy && (provisionedPolicy.os !== worker.os || provisionedPolicy.allowCodeChanges !== Boolean(worker.allow_code_changes))) return null;
     const jobs = db.prepare("SELECT * FROM controller_jobs WHERE status='Ready' AND (required_os='any' OR required_os=?) ORDER BY created_at,global_job_id LIMIT 20").all(worker.os) as any[];
     for (const job of jobs) {
+      if(job.work_class==='code_change'){
+        if(!projectGuard||!Array.isArray(projectGuard.availableProjects)||!projectGuard.availableProjects.includes(job.service))continue;
+        const lockTable=db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_lock_meta'").get();if(!lockTable)continue;
+        const currentVersion=(db.prepare('SELECT version FROM project_lock_meta WHERE id=1').get() as {version:number}|undefined)?.version;if(currentVersion!==projectGuard.lockVersion)continue;
+      }
       if (job.work_class === 'code_change' && (worker.os !== 'windows' || worker.available_memory_bytes < MIN_CODE_CHANGE_MEMORY_BYTES || worker.allow_code_changes !== 1 || provisionedPolicy && !provisionedPolicy.allowCodeChanges || worker.sandbox_status !== 'Ready' || worker.chatgpt_login_status !== 'ChatGPT' || worker.codex_cli_status !== 'Ready')) continue;
       if (job.work_class === 'code_change') {
         const active = db.prepare("SELECT 1 FROM controller_jobs WHERE service=? AND work_class='code_change' AND status IN ('Claimed','Running','Testing') LIMIT 1").get(job.service);
@@ -171,8 +188,8 @@ export function claimControllerJob(workerId: string, leaseMs = 60_000, dbPath?: 
       const leaseId = randomUUID(); const nextToken = Number((db.prepare("SELECT value FROM controller_meta WHERE key='fencing_counter'").get() as { value: string }).value) + 1;
       const expiresAt = new Date(stamp + Math.max(10_000, Math.min(leaseMs, 5 * 60_000))).toISOString();
       db.prepare("UPDATE controller_meta SET value=? WHERE key='fencing_counter'").run(String(nextToken));
-      db.prepare("UPDATE controller_jobs SET status='Claimed',worker_id=?,lease_id=?,fencing_token=?,acquired_at=?,expires_at=?,last_renewed_at=?,updated_at=? WHERE global_job_id=? AND status='Ready'")
-        .run(workerId, leaseId, nextToken, new Date(stamp).toISOString(), expiresAt, new Date(stamp).toISOString(), nowIso(), job.global_job_id);
+      db.prepare("UPDATE controller_jobs SET status='Claimed',worker_id=?,lease_id=?,fencing_token=?,acquired_at=?,expires_at=?,last_renewed_at=?,updated_at=?,project_lock_version=? WHERE global_job_id=? AND status='Ready'")
+        .run(workerId, leaseId, nextToken, new Date(stamp).toISOString(), expiresAt, new Date(stamp).toISOString(), nowIso(), job.work_class === 'code_change' ? projectGuard!.lockVersion : null, job.global_job_id);
       const changed = db.prepare('SELECT changes() n').get() as { n: number }; if (changed.n !== 1) return null;
       db.prepare("UPDATE controller_workers SET current_job_id=?,state='Busy',execution_status='Claimed',updated_at=? WHERE worker_id=?").run(job.global_job_id, nowIso(), workerId);
       event(db, job.global_job_id, workerId, 'claimed', nextToken, { leaseId, expiresAt });
@@ -198,8 +215,9 @@ export function workerMatchesControllerPolicy(workerId: string, policy: Controll
 
 export function renewControllerLease(input: { jobId: string; workerId: string; leaseId: string; fencingToken: number }, leaseMs = 60_000, dbPath?: string) {
   const db = openControllerDb(dbPath); const tx = db.transaction(() => {
-    const job = db.prepare('SELECT status,expires_at FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND lease_id=? AND fencing_token=?').get(input.jobId, input.workerId, input.leaseId, input.fencingToken) as { status: string; expires_at: string } | undefined;
+    const job = db.prepare('SELECT status,expires_at,work_class,service,project_lock_version FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND lease_id=? AND fencing_token=?').get(input.jobId, input.workerId, input.leaseId, input.fencingToken) as { status: string; expires_at: string; work_class?: string; service?: string; project_lock_version?: number | null } | undefined;
     if (!job || !ACTIVE.includes(job.status as typeof ACTIVE[number]) && job.status !== 'Claimed') throw new Error('Lease or fencing token is stale.');
+    assertProjectLockVersion(db, job);
     if (Date.parse(job.expires_at) <= Date.now()) throw new Error('Expired leases cannot be renewed. Operator recovery evidence is required.');
     const stamp = nowIso(), expiresAt = new Date(Date.now() + Math.max(10_000, Math.min(leaseMs, 5 * 60_000))).toISOString();
     db.prepare('UPDATE controller_jobs SET expires_at=?,last_renewed_at=?,updated_at=? WHERE global_job_id=?').run(expiresAt, stamp, stamp, input.jobId);
@@ -217,8 +235,9 @@ export function transitionControllerJob(input: { jobId: string; workerId: string
     summaryCode: typeof rawResult.summaryCode === 'string' && /^[A-Z0-9_.-]{1,64}$/i.test(rawResult.summaryCode) ? rawResult.summaryCode : undefined,
   };
   const db = openControllerDb(dbPath); const tx = db.transaction(() => {
-    const job = db.prepare('SELECT status,expires_at FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND lease_id=? AND fencing_token=?').get(input.jobId, input.workerId, input.leaseId, input.fencingToken) as { status: string; expires_at: string } | undefined;
+    const job = db.prepare('SELECT status,expires_at,work_class,service,project_lock_version FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND lease_id=? AND fencing_token=?').get(input.jobId, input.workerId, input.leaseId, input.fencingToken) as { status: string; expires_at: string; work_class?: string; service?: string; project_lock_version?: number | null } | undefined;
     if (!job || Date.parse(job.expires_at) <= Date.now()) throw new Error('Stale or expired fencing token; transition rejected.');
+    assertProjectLockVersion(db, job);
     const allowed: Record<string, string[]> = { Claimed: ['Running', 'Testing', 'Completed', 'Failed'], Running: ['Testing', 'Completed', 'Failed'], Testing: ['Completed', 'Failed'] };
     if (!allowed[job.status]?.includes(input.status)) throw new Error(`Invalid job transition ${job.status} -> ${input.status}.`);
     db.prepare('UPDATE controller_jobs SET status=?,result_json=?,failure_code=?,updated_at=? WHERE global_job_id=? AND fencing_token=?').run(input.status, Object.values(safeResult).some(value => value !== undefined) ? JSON.stringify(safeResult) : null, input.failureCode ?? null, nowIso(), input.jobId, input.fencingToken);
@@ -229,7 +248,7 @@ export function transitionControllerJob(input: { jobId: string; workerId: string
 }
 
 export function assertCurrentControllerLease(input: { jobId: string; workerId: string; fencingToken: number }, dbPath?: string) {
-  const db = openControllerDb(dbPath); const row = db.prepare("SELECT 1 ok FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND fencing_token=? AND status IN ('Claimed','Running','Testing') AND expires_at>? ").get(input.jobId, input.workerId, input.fencingToken, nowIso()); db.close();
+  const db = openControllerDb(dbPath); let row:({ok:number;work_class?:string;service?:string;project_lock_version?:number|null}|undefined); try { row = db.prepare("SELECT 1 ok,work_class,service,project_lock_version FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND fencing_token=? AND status IN ('Claimed','Running','Testing') AND expires_at>? ").get(input.jobId, input.workerId, input.fencingToken, nowIso()) as typeof row; if(row)assertProjectLockVersion(db,row); } finally { db.close(); }
   if (!row) throw new Error('Current fencing token is not valid; external side effect blocked.'); return true;
 }
 
@@ -267,6 +286,6 @@ export function controllerJobStatuses(jobIds: string[], dbPath?: string) {
   if (!Array.isArray(jobIds) || jobIds.length > 200 || jobIds.some(id => typeof id !== 'string' || id.length > 80)) throw new Error('Invalid status query.');
   if (!jobIds.length) return [];
   const db = openControllerDb(dbPath); const placeholders = jobIds.map(() => '?').join(',');
-  const rows = db.prepare(`SELECT global_job_id AS globalJobId,status,worker_id AS workerId,fencing_token AS fencingToken,expires_at AS expiresAt,updated_at AS updatedAt FROM controller_jobs WHERE global_job_id IN (${placeholders})`).all(...jobIds);
+  const rows = db.prepare(`SELECT global_job_id AS globalJobId,status,worker_id AS workerId,fencing_token AS fencingToken,expires_at AS expiresAt,updated_at AS updatedAt,service,work_class AS workClass,project_lock_version AS projectLockVersion FROM controller_jobs WHERE global_job_id IN (${placeholders})`).all(...jobIds);
   db.close(); return rows;
 }

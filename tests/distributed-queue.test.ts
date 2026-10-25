@@ -18,6 +18,7 @@ function worker(workerId: string, osName: 'windows' | 'linux' = 'windows') {
 function register(workerId: string, osName: 'windows' | 'linux' = 'windows', file = dbPath()) {
  return registerControllerWorker(worker(workerId, osName), file, {os:osName,allowCodeChanges:osName==='windows'});
 }
+function claimCodeJob(workerId:string,leaseMs:number,file:string,availableProjects=['tools','docs','quiz','home']){const db=new Database(file);db.exec("CREATE TABLE IF NOT EXISTS project_lock_meta(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);INSERT OR IGNORE INTO project_lock_meta(id,version) VALUES(1,1);CREATE TABLE IF NOT EXISTS project_development_locks(project_id TEXT PRIMARY KEY,state TEXT NOT NULL);INSERT OR IGNORE INTO project_development_locks VALUES('tools','AVAILABLE'),('docs','AVAILABLE'),('quiz','AVAILABLE'),('home','AVAILABLE')");db.close();return claimControllerJob(workerId,leaseMs,file,undefined,{lockVersion:1,availableProjects});}
 function request(url: string, token: string, workerId: string, nonce = crypto.randomUUID(), body: unknown = worker(workerId)) {
  return fetch(url, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-woori-worker-id': workerId, 'x-woori-timestamp': String(Date.now()), 'x-woori-nonce': nonce, 'x-woori-request-id': crypto.randomUUID() }, body: JSON.stringify(body) });
 }
@@ -36,7 +37,7 @@ describe('distributed Controller lease safety', () => {
   const file = setup(); register('worker-win-01', 'windows', file); register('worker-win-02', 'windows', file);
   const submitted = submitControllerJob({ service: 'tools', kind: 'bug', workClass: 'code_change', requiredOs: 'windows', idempotencyKey: 'tool-job', title: 'Fix a verified tool issue', resourceKeys: ['service:tools', 'src/tool.ts'] }, file);
   approveControllerJob(submitted.globalJobId, file);
-  const claims = await Promise.all([Promise.resolve().then(() => claimControllerJob('worker-win-01', 60_000, file)), Promise.resolve().then(() => claimControllerJob('worker-win-02', 60_000, file))]);
+  const claims = await Promise.all([Promise.resolve().then(() => claimCodeJob('worker-win-01',60_000,file)), Promise.resolve().then(() => claimCodeJob('worker-win-02',60_000,file))]);
   const leases = claims.filter(Boolean);
   expect(leases).toHaveLength(1);
   const lease = leases[0]!;
@@ -44,13 +45,33 @@ describe('distributed Controller lease safety', () => {
   expect(() => assertCurrentControllerLease({ jobId: lease.jobId, workerId: lease.workerId, fencingToken: lease.fencingToken }, file)).not.toThrow();
  });
 
+ it('requires the current project lock version and skips projects absent from the unlocked set', () => {
+  const file=setup();register('worker-win-lock','windows',file);
+  const submitted=submitControllerJob({service:'quiz',kind:'feature',workClass:'code_change',requiredOs:'windows',idempotencyKey:'quiz-lock-guard',title:'Quiz feature'},file);
+  approveControllerJob(submitted.globalJobId,file);
+  const db=new Database(file);db.exec("CREATE TABLE project_lock_meta(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);INSERT INTO project_lock_meta VALUES(1,2);CREATE TABLE project_development_locks(project_id TEXT PRIMARY KEY,state TEXT NOT NULL);INSERT INTO project_development_locks VALUES('quiz','AVAILABLE')");db.close();
+  expect(claimControllerJob('worker-win-lock',60_000,file,undefined,{lockVersion:1,availableProjects:['quiz']})).toBeNull();
+  expect(claimControllerJob('worker-win-lock',60_000,file,undefined,{lockVersion:2,availableProjects:['docs']})).toBeNull();
+  expect(claimControllerJob('worker-win-lock',60_000,file,undefined,{lockVersion:2,availableProjects:['quiz']})).toMatchObject({jobId:submitted.globalJobId});
+ });
+
+ it('invalidates active code-change leases after any project lock version change', () => {
+  const file=setup();register('worker-win-lock-stale','windows',file);
+  const submitted=submitControllerJob({service:'quiz',kind:'feature',workClass:'code_change',requiredOs:'windows',idempotencyKey:'quiz-lock-version-active',title:'Quiz feature'},file);
+  approveControllerJob(submitted.globalJobId,file);const lease=claimCodeJob('worker-win-lock-stale',60_000,file)!;
+  const db=new Database(file);db.prepare('UPDATE project_lock_meta SET version=version+1 WHERE id=1').run();db.close();
+  expect(()=>renewControllerLease(lease,60_000,file)).toThrow(/PROJECT_LOCK_VERSION_STALE/);
+  expect(()=>transitionControllerJob({...lease,status:'Failed'},file)).toThrow(/PROJECT_LOCK_VERSION_STALE/);
+  expect(()=>assertCurrentControllerLease(lease,file)).toThrow(/PROJECT_LOCK_VERSION_STALE/);
+ });
+
  it('honors overlapping repository/path resource locks across service jobs', () => {
   const file=setup();register('worker-win-31','windows',file);register('worker-win-32','windows',file);
   const first=submitControllerJob({service:'docs',kind:'bug',workClass:'code_change',requiredOs:'windows',idempotencyKey:'lock-a',title:'Docs work',resourceKeys:['repo:shared','path:src/common.ts']},file);
   const second=submitControllerJob({service:'quiz',kind:'feature',workClass:'code_change',requiredOs:'windows',idempotencyKey:'lock-b',title:'Quiz work',resourceKeys:['repo:shared','path:src/common.ts']},file);
   approveControllerJob(first.globalJobId,file);approveControllerJob(second.globalJobId,file);
-  expect(claimControllerJob('worker-win-31',60_000,file)?.jobId).toBe(first.globalJobId);
-  expect(claimControllerJob('worker-win-32',60_000,file)).toBeNull();
+  expect(claimCodeJob('worker-win-31',60_000,file)?.jobId).toBe(first.globalJobId);
+  expect(claimCodeJob('worker-win-32',60_000,file)).toBeNull();
  });
 
  it('does not let a Worker reset its registration or claim a second job while a lease is active', () => {
@@ -58,10 +79,10 @@ describe('distributed Controller lease safety', () => {
   const first=submitControllerJob({service:'docs',kind:'seo',workClass:'analysis',idempotencyKey:'single-lease-a',title:'First analysis'},file);
   const second=submitControllerJob({service:'quiz',kind:'seo',workClass:'analysis',idempotencyKey:'single-lease-b',title:'Second analysis'},file);
   approveControllerJob(first.globalJobId,file);approveControllerJob(second.globalJobId,file);
-  const lease=claimControllerJob('worker-win-35',60_000,file)!;
+  const lease=claimCodeJob('worker-win-35',60_000,file)!;
   expect(()=>heartbeatControllerWorker(worker('worker-win-35'),file,{os:'windows',allowCodeChanges:true})).toThrow(/cannot clear or change an active job/i);
   expect(()=>registerControllerWorker(worker('worker-win-35'),file,{os:'windows',allowCodeChanges:true})).toThrow(/cannot clear an active job lease/i);
-  expect(claimControllerJob('worker-win-35',60_000,file)).toBeNull();
+  expect(claimCodeJob('worker-win-35',60_000,file)).toBeNull();
   expect(controllerDashboardSnapshot(file).jobs.find(job=>job.globalJobId===lease.jobId)?.status).toBe('Claimed');
  });
 
@@ -69,13 +90,13 @@ describe('distributed Controller lease safety', () => {
   const file = setup(); register('worker-win-11', 'windows', file); register('worker-win-12', 'windows', file);
   const submitted = submitControllerJob({ service: 'home', kind: 'bug', workClass: 'code_change', requiredOs: 'windows', idempotencyKey: 'home-job', title: 'Fix a verified home issue' }, file);
   approveControllerJob(submitted.globalJobId, file);
-  const lease = claimControllerJob('worker-win-11', 60_000, file)!;
+  const lease = claimCodeJob('worker-win-11',60_000,file)!;
   const db = new Database(file); db.prepare('UPDATE controller_jobs SET expires_at=? WHERE global_job_id=?').run(new Date(Date.now() - 1_000).toISOString(), lease.jobId); db.close();
-  expect(claimControllerJob('worker-win-12', 60_000, file)).toBeNull();
+  expect(claimCodeJob('worker-win-12',60_000,file)).toBeNull();
   expect(() => renewControllerLease({ jobId: lease.jobId, workerId: lease.workerId, leaseId: lease.leaseId, fencingToken: lease.fencingToken }, 60_000, file)).toThrow(/Expired leases/i);
   expect(() => recoverExpiredControllerJob({ jobId: lease.jobId, processTerminated: false, verifiedBy: '', evidence: '' }, file)).toThrow(/termination evidence/i);
   recoverExpiredControllerJob({ jobId: lease.jobId, processTerminated: true, verifiedBy: 'local-operator', evidence: 'Worker process tree and host were checked after lease expiry.' }, file);
-  const replacement = claimControllerJob('worker-win-12', 60_000, file)!;
+  const replacement = claimCodeJob('worker-win-12',60_000,file)!;
   expect(replacement.fencingToken).toBeGreaterThan(lease.fencingToken);
   expect(() => transitionControllerJob({ ...lease, status: 'Completed' }, file)).toThrow(/Stale or expired fencing token/i);
   expect(() => assertCurrentControllerLease({ jobId: lease.jobId, workerId: lease.workerId, fencingToken: lease.fencingToken }, file)).toThrow(/side effect blocked/i);
@@ -87,7 +108,7 @@ describe('distributed Controller lease safety', () => {
   approveControllerJob(code.globalJobId, file);
   const analysis = submitControllerJob({ service: 'docs', kind: 'seo', workClass: 'analysis', idempotencyKey: 'linux-analysis', title: 'Review SEO' }, file);
   approveControllerJob(analysis.globalJobId, file);
-  const lease = claimControllerJob('worker-linux-01', 60_000, file)!;
+  const lease = claimCodeJob('worker-linux-01',60_000,file)!;
   expect(lease.jobId).toBe(analysis.globalJobId);
   heartbeatControllerWorker({ ...worker('worker-linux-01', 'linux'), currentJobId: lease.jobId, executionStatus: 'Running' }, file);
   const snapshot = controllerDashboardSnapshot(file, 0);
@@ -152,6 +173,7 @@ describe('distributed Controller lease safety', () => {
    const policy=await request(`${base}/v1/policy/current`,token,'worker-policy-sync',crypto.randomUUID(),{});expect(policy.status).toBe(200);expect((await policy.json() as any).result).toMatchObject({version:1,mode:'MONITOR_ONLY',emergencyStop:false});
    const current=getAgentPolicy(file);updateAgentPolicy({expectedVersion:current.version,actor:'integration-test',reason:'advance worker policy',patch:{mode:'BUG_FIX'}},file);
    const staleClaim=await request(`${base}/v1/jobs/claim`,token,'worker-policy-sync',crypto.randomUUID(),{policyVersion:1,leaseMs:60_000});expect(staleClaim.status).toBe(409);expect(await staleClaim.json()).toMatchObject({error:'POLICY_VERSION_STALE:2'});
+   const staleProjectLock=await request(`${base}/v1/jobs/claim`,token,'worker-policy-sync',crypto.randomUUID(),{policyVersion:2,projectLockVersion:0,leaseMs:60_000});expect(staleProjectLock.status).toBe(409);expect(await staleProjectLock.json()).toMatchObject({error:'PROJECT_LOCK_VERSION_STALE:1'});
    const latest=getAgentPolicy(file);updateAgentPolicy({expectedVersion:latest.version,actor:'integration-test',reason:'verify emergency gate',patch:{emergencyStop:true}},file);
    const refreshed=await request(`${base}/v1/policy/current`,token,'worker-policy-sync',crypto.randomUUID(),{});expect((await refreshed.json() as any).result).toMatchObject({version:3,emergencyStop:true});expect(listPolicyAudit(file)[0]).toMatchObject({policyVersion:3,workerSyncStatus:'Acknowledged by 1 Worker(s)',workers:[{workerId:'worker-policy-sync',policyVersion:3}]});
    const claim=await request(`${base}/v1/jobs/claim`,token,'worker-policy-sync',crypto.randomUUID(),{policyVersion:3,leaseMs:60_000});expect(claim.status).toBe(403);expect(await claim.json()).toMatchObject({error:'POLICY_BLOCKED:3'});
@@ -164,7 +186,7 @@ describe('distributed Controller lease safety', () => {
   try{
    await request(`${base}/v1/workers/register`,token,'worker-lease-policy',crypto.randomUUID(),worker('worker-lease-policy','linux'));
    const job=submitControllerJob({service:'docs',kind:'qa',workClass:'analysis',idempotencyKey:'policy-version-lease-test',title:'read-only analysis',requiredOs:'linux'},file);approveControllerJob(job.globalJobId,file);
-   const claimed=await request(`${base}/v1/jobs/claim`,token,'worker-lease-policy',crypto.randomUUID(),{policyVersion:1,leaseMs:60_000});const lease=(await claimed.json() as any).result;expect(claimed.status).toBe(200);
+    const claimed=await request(`${base}/v1/jobs/claim`,token,'worker-lease-policy',crypto.randomUUID(),{policyVersion:1,projectLockVersion:1,leaseMs:60_000});const lease=(await claimed.json() as any).result;expect(claimed.status).toBe(200);
    updateAgentPolicy({expectedVersion:1,actor:'integration-test',reason:'invalidate worker lease policy',patch:{mode:'BUG_FIX'}},file);
    const renewal=await request(`${base}/v1/leases/renew`,token,'worker-lease-policy',crypto.randomUUID(),{jobId:lease.jobId,leaseId:lease.leaseId,fencingToken:lease.fencingToken,policyVersion:1,leaseMs:60_000});expect(renewal.status).toBe(409);expect(await renewal.json()).toMatchObject({error:'POLICY_VERSION_STALE:2'});
    const transition=await request(`${base}/v1/jobs/transition`,token,'worker-lease-policy',crypto.randomUUID(),{jobId:lease.jobId,leaseId:lease.leaseId,fencingToken:lease.fencingToken,policyVersion:1,status:'Failed'});expect(transition.status).toBe(409);expect(await transition.json()).toMatchObject({error:'POLICY_VERSION_STALE:2'});
@@ -182,7 +204,7 @@ describe('distributed Controller lease safety', () => {
    const registerUrl=`${base}/v1/workers/register`,nonce=crypto.randomUUID();
    const accepted=await request(registerUrl,token,'worker-policy-01',nonce,worker('worker-policy-01','linux'));expect(accepted.status).toBe(200);
    const code=submitControllerJob({service:'docs',kind:'bug',workClass:'code_change',requiredOs:'windows',idempotencyKey:'policy-lock',title:'must not run'},file);approveControllerJob(code.globalJobId,file);
-   const claimed=await request(`${base}/v1/jobs/claim`,token,'worker-policy-01',crypto.randomUUID(),{policyVersion:1,leaseMs:60_000});
+    const claimed=await request(`${base}/v1/jobs/claim`,token,'worker-policy-01',crypto.randomUUID(),{policyVersion:1,projectLockVersion:1,leaseMs:60_000});
    expect((await claimed.json() as {result:unknown}).result).toBeNull();
    expect(controllerDashboardSnapshot(file).workers[0]?.allowCodeChanges).toBe(false);
   }finally{await app.close();}

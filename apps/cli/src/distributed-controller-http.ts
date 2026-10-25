@@ -12,6 +12,7 @@ import {
 import type { ControllerWorkerPolicy, WorkerOs } from './distributed-queue.js';
 import { initializeScheduler, initializeServiceControls, recordControllerHeartbeat, recordWorkerHealthSnapshots, schedulerSnapshot } from './scheduler.js';
 import { getAgentPolicy, policyExecutionGate, recordWorkerPolicyAcknowledgement } from './agent-policy.js';
+import { getProjectClaimSnapshot } from './project-development-locks.js';
 
 const envTokens = () => {
   const raw = process.env.WOORI_CONTROLLER_WORKER_TOKENS;
@@ -89,20 +90,20 @@ export function createDistributedControllerServer(options: ControllerOptions = {
         if (req.url === '/v1/workers/register') result = registerControllerWorker({ ...input, workerId }, dbPath, policy);
         else if (req.url === '/v1/workers/heartbeat') { result = heartbeatControllerWorker({ ...input, workerId }, dbPath, policy); recordWorkerHealthSnapshots(dbPath); }
         else if (req.url === '/v1/monitor/snapshot') result = schedulerSnapshot(dbPath,Number.isSafeInteger(input.afterEventId)?Math.max(0,input.afterEventId):0);
-        else if (req.url === '/v1/policy/current') { const policy=getAgentPolicy(dbPath);recordWorkerPolicyAcknowledgement(workerId,policy.version,dbPath);result={version:policy.version,mode:policy.mode,emergencyStop:policy.emergencyStop,global:policy.global,services:policy.services,execution:{development:policyExecutionGate('development',dbPath),codex:policyExecutionGate('codex',dbPath),pr:policyExecutionGate('pr',dbPath),merge:policyExecutionGate('merge',dbPath),deploy:policyExecutionGate('deploy',dbPath)}}; }
+        else if (req.url === '/v1/policy/current') { const policy=getAgentPolicy(dbPath);recordWorkerPolicyAcknowledgement(workerId,policy.version,dbPath);result={version:policy.version,mode:policy.mode,emergencyStop:policy.emergencyStop,global:policy.global,services:policy.services,projectDevelopment:getProjectClaimSnapshot({databasePath:dbPath}),execution:{development:policyExecutionGate('development',dbPath),codex:policyExecutionGate('codex',dbPath),pr:policyExecutionGate('pr',dbPath),merge:policyExecutionGate('merge',dbPath),deploy:policyExecutionGate('deploy',dbPath)}}; }
         else if (req.url === '/v1/jobs/submit') result = submitControllerJob(input, dbPath);
         else if (req.url === '/v1/jobs/status') result = controllerJobStatuses(input.jobIds, dbPath);
-        else if (req.url === '/v1/jobs/claim') { const current=getAgentPolicy(dbPath); if(!Number.isSafeInteger(input.policyVersion)||input.policyVersion!==current.version)throw new Error(`POLICY_VERSION_STALE:${current.version}`); if(current.emergencyStop||current.mode==='PAUSED'||!current.globalAutomationEnabled)throw new Error(`POLICY_BLOCKED:${current.version}`); result = currentControllerLease(workerId, dbPath) ?? claimControllerJob(workerId, input.leaseMs, dbPath, policy); }
+        else if (req.url === '/v1/jobs/claim') { const current=getAgentPolicy(dbPath); if(!Number.isSafeInteger(input.policyVersion)||input.policyVersion!==current.version)throw new Error(`POLICY_VERSION_STALE:${current.version}`); if(current.emergencyStop||current.mode==='PAUSED'||!current.globalAutomationEnabled)throw new Error(`POLICY_BLOCKED:${current.version}`);const projectDevelopment=getProjectClaimSnapshot({databasePath:dbPath});if(!Number.isSafeInteger(input.projectLockVersion)||input.projectLockVersion!==projectDevelopment.lockVersion)throw new Error(`PROJECT_LOCK_VERSION_STALE:${projectDevelopment.lockVersion}`);const active=currentControllerLease(workerId,dbPath);if(active){const job=controllerJobStatuses([active.jobId],dbPath)[0] as any;if(job?.workClass==='code_change'){assertCurrentProjectLock(job,projectDevelopment);if(job.projectLockVersion!==projectDevelopment.lockVersion)throw new Error(`PROJECT_LOCK_VERSION_STALE:${projectDevelopment.lockVersion}`);}result=active;}else result=claimControllerJob(workerId,input.leaseMs,dbPath,policy,projectDevelopment); }
         else if (req.url === '/v1/jobs/approve-local') { respond(403, { error: 'operator_action_is_local_only' }); return; }
-        else if (req.url === '/v1/leases/renew') { const version=assertPolicyVersion(input,dbPath),current=getAgentPolicy(dbPath);if(current.emergencyStop||current.mode==='PAUSED'||!current.globalAutomationEnabled)throw new Error(`POLICY_BLOCKED:${version}`);result = renewControllerLease({ ...input, workerId }, input.leaseMs, dbPath); }
-        else if (req.url === '/v1/jobs/transition') { const version=assertPolicyVersion(input,dbPath),current=getAgentPolicy(dbPath);if(current.emergencyStop||current.mode==='PAUSED'||!current.globalAutomationEnabled)throw new Error(`POLICY_BLOCKED:${version}`);result = transitionControllerJob({ ...input, workerId }, dbPath); }
-        else if (req.url === '/v1/leases/assert') result = { valid: Boolean(assertLease(input, workerId, dbPath)) };
+        else if (req.url === '/v1/leases/renew') { const version=assertPolicyVersion(input,dbPath),current=getAgentPolicy(dbPath);if(current.emergencyStop||current.mode==='PAUSED'||!current.globalAutomationEnabled)throw new Error(`POLICY_BLOCKED:${version}`);assertCurrentProjectLock(controllerJobStatuses([input.jobId],dbPath)[0],getProjectClaimSnapshot({databasePath:dbPath}));result = renewControllerLease({ ...input, workerId }, input.leaseMs, dbPath); }
+        else if (req.url === '/v1/jobs/transition') { const version=assertPolicyVersion(input,dbPath),current=getAgentPolicy(dbPath);if(current.emergencyStop||current.mode==='PAUSED'||!current.globalAutomationEnabled)throw new Error(`POLICY_BLOCKED:${version}`);assertCurrentProjectLock(controllerJobStatuses([input.jobId],dbPath)[0],getProjectClaimSnapshot({databasePath:dbPath}));result = transitionControllerJob({ ...input, workerId }, dbPath); }
+        else if (req.url === '/v1/leases/assert') {assertCurrentProjectLock(controllerJobStatuses([input.jobId],dbPath)[0],getProjectClaimSnapshot({databasePath:dbPath}));result = { valid: Boolean(assertLease(input, workerId, dbPath)) };}
         else { respond(404, { error: 'not_found' }); return; }
         const response = { requestId, result };
         respond(200, response);
       } catch (error) {
         const message = error instanceof Error ? error.message : 'request_failed';
-        const status = /credential|authentication|nonce|timestamp/i.test(message) ? 401 : /policy_blocked/i.test(message) ? 403 : /stale|expired|fencing|lease|policy_version/i.test(message) ? 409 : 400;
+        const status = /credential|authentication|nonce|timestamp/i.test(message) ? 401 : /policy_blocked/i.test(message) ? 403 : /stale|expired|fencing|lease|policy_version|project_lock/i.test(message) ? 409 : 400;
         respond(status, { error: message });
       }
     });
@@ -116,6 +117,11 @@ export function createDistributedControllerServer(options: ControllerOptions = {
 
 function assertLease(input: { jobId: string; fencingToken: number }, workerId: string, dbPath?: string) {
   return assertCurrentControllerLease({ jobId: input.jobId, workerId, fencingToken: input.fencingToken }, dbPath);
+}
+function assertCurrentProjectLock(job: any, snapshot: ReturnType<typeof getProjectClaimSnapshot>) {
+  if(job?.workClass!=='code_change')return;
+  if(job.projectLockVersion!==snapshot.lockVersion)throw new Error(`PROJECT_LOCK_VERSION_STALE:${snapshot.lockVersion}`);
+  if(!snapshot.availableProjects.includes(job.service))throw new Error(`PROJECT_LOCKED:${job.service}`);
 }
 function assertPolicyVersion(input: { policyVersion?: number }, dbPath?:string) { const version=getAgentPolicy(dbPath).version;if(!Number.isSafeInteger(input.policyVersion)||input.policyVersion!==version)throw new Error(`POLICY_VERSION_STALE:${version}`);return version; }
 
