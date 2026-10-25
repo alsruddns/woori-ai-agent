@@ -121,7 +121,7 @@ export function createPlatformAdapter(platform = process.platform): PlatformAdap
       reason: id === 'windows' ? 'Workspace-write is available only after the Windows MXC probe succeeds.' : sandbox.reason,
       sandbox,
       buildExecArgs: id === 'windows'
-        ? (worktree, mode, prompt) => ['-c','windows.sandbox=mxc','exec','--ignore-user-config','--sandbox',mode,'--ephemeral','--json','--cd',worktree,prompt]
+        ? (worktree, mode, prompt) => ['-c','windows.sandbox=mxc','-c','mcp_servers={}','exec','--ignore-user-config','--sandbox',mode,'--ephemeral','--json','--cd',worktree,prompt]
         : id === 'linux'
           ? (worktree, mode, prompt) => ['-c','sandbox_workspace_write.network_access=false','exec','--ignore-user-config','--sandbox',mode,'--ephemeral','--json','--cd',worktree,prompt]
           : () => null,

@@ -11,6 +11,7 @@ describe('platform adapters',()=>{
   expect(adapter.processRunner.timeoutTermination).toBe('taskkill-tree');
   expect(adapter.codexExecutor.reason).toMatch(/MXC probe/i);
   expect(adapter.codexExecutor.buildExecArgs('C:/work','workspace-write','task')?.join(' ')).toContain('windows.sandbox=mxc');
+  expect(adapter.codexExecutor.buildExecArgs('C:/work','workspace-write','task')).toContain('mcp_servers={}');
  });
 
  it('reports Linux credentials and sandbox as not configured and never falls back to DPAPI',()=>{
