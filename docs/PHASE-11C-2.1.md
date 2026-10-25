@@ -40,6 +40,7 @@ The final live fixture's reported target files included both locale JSON files, 
 - Independent checks in the third run: typecheck, lint, build, and 3 Node tests all exited 0. Contract path/export/artifact validation returned `passed: true`.
 - Release readiness from that live run: `Not Ready` because the then-current HTML tag parser did not observe rendered metadata. The parser has since been corrected and tested against rendered fixture HTML, but the exact live artifact set was already deleted; full live release readiness remains unverified.
 - Temporary audit at run time: feature hash chain valid (5 events), task chain valid (6 events). The third run predated persistent audit import and its temp SQLite was deleted. New runs will persist a summary; the new import path was not exercised live.
+- The observed outcomes were subsequently imported into the persistent `data/woori-agent.sqlite` as audit job `FEATURE-2026-000001`; its append-only chain verified with 2 events. This records the failure and uncertainty without converting it to success.
 - API-key/paid model fallback: none. The ChatGPT Codex session used existing account allowance; it may consume that subscription's quota. No claim is made about the account's overall plan cost.
 - Live services, their repositories, iwinv, PRs, merge, and deployment: untouched.
 
@@ -50,7 +51,7 @@ The final live fixture's reported target files included both locale JSON files, 
 - Vitest: 157 tests passed across 27 files.
 - Dashboard production build: passed.
 - `git diff --check`: passed.
-- Ubuntu CI: not yet run for this change; it will be triggered by the woori-ai-agent develop push and reported from the actual Actions result.
+- Ubuntu CI: Run `40166410159` succeeded on commit `5a6e035af16152432fb2460fa3847d123cb45896`. TypeScript/lint/tests/build, package checks, and Linux deployment package validation passed. Rootless Bubblewrap and systemd/cgroup prerequisites were not ready on the hosted runner, so Linux Codex code modification remains disabled.
 
 ## Remaining work
 
