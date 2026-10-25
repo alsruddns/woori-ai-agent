@@ -4,7 +4,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import { enqueueDevelopmentTask, listDevelopmentTasks, transitionDevelopmentTask } from '../apps/cli/src/development-orchestrator.js';
-import { cleanupDevelopmentWorktree, codexExecutorInternals, executeApprovedTask, listDevelopmentExecutions } from '../apps/cli/src/codex-executor.js';
+import { cleanupDevelopmentWorktree, codexExecutorInternals, executeApprovedTask, listDevelopmentExecutions, parseGitStatusPorcelainZ } from '../apps/cli/src/codex-executor.js';
 import { codexExecArgs, paidCredentialVariablesPresent, parseAllowedPaths, pathMatchesAllowlist, probeCodexSandbox, redactCodexOutput, safeCodexEnv } from '../apps/cli/src/codex-cli.js';
 import type { LinuxRuntimeReadiness } from '../apps/cli/src/linux-runtime.js';
 
@@ -18,6 +18,10 @@ const repository=(localPath:string,overrides:Record<string,unknown>={})=>({id:'d
 function fakeCli(root:string){const file=path.join(root,'fake-codex.cjs');fs.writeFileSync(file,`const a=process.argv.slice(2);if(a[0]==='--version')console.log('codex-cli 0.163.0');else if(a[0]==='login'&&a[1]==='status')console.log('Logged in using ChatGPT');`);return{kind:'node' as const,executable:process.execPath,prefixArgs:[file],version:'codex-cli 0.163.0'};}
 
 describe('Codex local execution safety',()=>{
+ it('preserves leading whitespace in NUL-delimited Git status paths and rename records',()=>{
+  expect(parseGitStatusPorcelainZ(' M locales/en.json\0?? public/en/page.html\0R  new/name.ts\0old/name.ts\0')).toEqual(['locales/en.json','public/en/page.html','new/name.ts','old/name.ts']);
+ });
+
  it('requires explicit scoped paths and pins the supported sandbox without danger-full-access',()=>{
   expect(parseAllowedPaths('src/**,tests/**/*.test.ts')).toEqual(['src/**','tests/**/*.test.ts']);
   expect(pathMatchesAllowlist('src/i18n/page.ts',['src/**'])).toBe(true);

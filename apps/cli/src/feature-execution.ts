@@ -1,4 +1,97 @@
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathMatchesAllowlist } from './codex-cli.js';
+
+export type VerificationCommand = 'typecheck' | 'lint' | 'test' | 'build';
+export type ExecutionContract = {
+  version: 1;
+  developmentJobId: string;
+  featureId: string;
+  project: 'calculator' | 'tools' | 'quiz' | 'docs';
+  featureName: string;
+  reason: string;
+  inputs: string[];
+  outputs: string[];
+  publicLocales: string[];
+  risk: 'Low' | 'Medium' | 'High' | 'Unknown';
+  policyVersion: number;
+  workerLease: { workerId: string; leaseId: string; fencingToken: number; expiresAt: string };
+  timeoutMs: number;
+  maxRetries: number;
+  localeRequirements: string[];
+  seoRequirements: string[];
+  sitemapRequirements: string[];
+  testRequirements: string[];
+  workspaceRoot: string;
+  sourceRoot: string;
+  targetFilePaths: string[];
+  allowedFileExtensions: string[];
+  fileAllowlist: string[];
+  immutableFilePaths: string[];
+  requiredExports: Array<{ file: string; name: string }>;
+  requiredBehavior: string[];
+  requiredTests: string[];
+  requiredTestPaths: string[];
+  verificationCommands: VerificationCommand[];
+  expectedArtifacts: string[];
+};
+
+function normalizedRelative(value: string) { return value.replace(/\\/g, '/').replace(/^\.\//, ''); }
+function validRelative(value: string) { const normalized = normalizedRelative(value); return Boolean(normalized) && !path.isAbsolute(value) && !normalized.split('/').some(part => part === '..' || part === '.'); }
+
+export function validateExecutionContractChanges(input: { contract: ExecutionContract; workspaceRoot: string; changedFiles: string[]; deletedFiles?: string[] }) {
+  const { contract } = input;
+  const failures: string[] = [];
+  const root = path.resolve(input.workspaceRoot);
+  if (contract.version !== 1 || path.resolve(contract.workspaceRoot) !== root) failures.push('Execution contract version or workspace root does not match the active worktree.');
+  for (const list of [contract.targetFilePaths, contract.immutableFilePaths, contract.expectedArtifacts]) {
+    if (list.some(file => !validRelative(file))) failures.push('Execution contract contains an unsafe or absolute file path.');
+  }
+  if (contract.requiredTestPaths.some(file => !validRelative(file) || !contract.immutableFilePaths.includes(file))) failures.push('Required test files must use safe paths and be declared immutable.');
+  if (contract.fileAllowlist.some(pattern => path.isAbsolute(pattern) || pattern.split(/[\\/]/).some(part => part === '..')) || contract.allowedFileExtensions.some(extension => !/^\.[a-z0-9]+$/i.test(extension))) failures.push('Execution contract allowlist or extension policy is unsafe.');
+  if (!contract.sourceRoot || !validRelative(contract.sourceRoot)) failures.push('Execution contract source root must be a safe workspace-relative path.');
+  const changed = [...new Set(input.changedFiles.map(normalizedRelative))];
+  const targets = new Set(contract.targetFilePaths.map(normalizedRelative));
+  const immutable = new Set(contract.immutableFilePaths.map(normalizedRelative));
+  for (const file of changed) {
+    if (!contract.fileAllowlist.some(pattern => pathMatchesAllowlist(file, [pattern]))) failures.push(`Changed file is outside the execution contract allowlist: ${file}`);
+    if (!targets.has(file)) failures.push(`Changed file is not an explicitly declared target: ${file}`);
+    const extension = path.posix.extname(file).toLowerCase();
+    if (!contract.allowedFileExtensions.map(value => value.toLowerCase()).includes(extension)) failures.push(`Changed file extension is not allowed by the execution contract: ${file}`);
+    if (immutable.has(file)) failures.push(`Immutable verification input was modified: ${file}`);
+  }
+  for (const file of input.deletedFiles ?? []) failures.push(`Deletion is not permitted by the execution contract: ${normalizedRelative(file)}`);
+  for (const file of contract.targetFilePaths) {
+    const absolute = path.resolve(root, file);
+    if (!absolute.startsWith(`${root}${path.sep}`) || !fs.existsSync(absolute)) failures.push(`Required target file is missing: ${file}`);
+    else {
+      const stat = fs.lstatSync(absolute);
+      if (stat.isSymbolicLink() || !stat.isFile()) failures.push(`Target must be a regular non-symlink file: ${file}`);
+      try { const real = fs.realpathSync(absolute), relative = path.relative(root, real); if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) failures.push(`Target resolves outside the worktree: ${file}`); } catch { failures.push(`Target real path cannot be verified: ${file}`); }
+      if (!changed.includes(normalizedRelative(file))) failures.push(`Declared target was not changed: ${file}`);
+      if (!contract.allowedFileExtensions.map(value => value.toLowerCase()).includes(path.posix.extname(file).toLowerCase())) failures.push(`Declared target extension is not allowed: ${file}`);
+    }
+  }
+  for (const artifact of contract.expectedArtifacts) {
+    const absolute = path.resolve(root, artifact);
+    if (!absolute.startsWith(`${root}${path.sep}`) || !fs.existsSync(absolute)) failures.push(`Expected artifact is missing: ${artifact}`);
+  }
+  for (const file of contract.immutableFilePaths) {
+    const absolute = path.resolve(root, file);
+    if (!absolute.startsWith(`${root}${path.sep}`) || !fs.existsSync(absolute)) failures.push(`Immutable verifier input is missing: ${file}`);
+    else if (fs.lstatSync(absolute).isSymbolicLink() || !fs.lstatSync(absolute).isFile()) failures.push(`Immutable verifier input must be a regular non-symlink file: ${file}`);
+  }
+  for (const file of contract.requiredTestPaths) if (!fs.existsSync(path.resolve(root, file))) failures.push(`Required independent test is missing: ${file}`);
+  for (const item of contract.requiredExports) {
+    const absolute = path.resolve(root, item.file);
+    if (!absolute.startsWith(`${root}${path.sep}`) || !fs.existsSync(absolute)) continue;
+    const source = fs.readFileSync(absolute, 'utf8');
+    const escaped = item.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (!new RegExp(`\\bexport\\s+(?:declare\\s+)?(?:async\\s+)?(?:function|const|class|type|interface)\\s+${escaped}\\b|\\bexport\\s*\\{[^}]*\\b${escaped}\\b[^}]*\\}`).test(source)) failures.push(`Required named export ${item.name} is missing from ${item.file}.`);
+  }
+  return { passed: failures.length === 0, failures, changedFiles: changed };
+}
 
 export type FeatureExecutionPlanInput = {
   developmentJobId: string;
@@ -16,6 +109,7 @@ export type FeatureExecutionPlanInput = {
   lease: { workerId: string; leaseId: string; fencingToken: number; expiresAt: string };
   timeoutMs?: number;
   maxRetries?: number;
+  executionContract?: ExecutionContract;
 };
 
 const FIXED_FORBIDDEN_PATHS = ['.github/**', '.env*', '**/secrets/**', '**/credentials*', 'deploy/**', 'deployment/**', 'infra/**', 'docker/**', 'package.json', 'pnpm-lock.yaml', 'package-lock.json'];
@@ -25,17 +119,41 @@ export function planFeatureExecution(input: FeatureExecutionPlanInput) {
   if (!input.developmentJobId.trim() || !input.featureId.trim() || !input.featureName.trim() || !input.reason.trim()) reasons.push('Job, feature, name and selection reason are required.');
   if (!input.requirements.length || !input.inputs.length || !input.outputs.length) reasons.push('Implementation requirements and input/output contracts must be explicit.');
   if (!input.allowedPaths.length || input.allowedPaths.some((path) => !/^(?:app|src|pages|tests?|messages|locales|public)\/[A-Za-z0-9_.*\-/]+$/.test(path) || path.includes('..'))) reasons.push('Allowed paths are missing or outside source, test, locale and public evidence directories.');
+  if (!input.executionContract || input.executionContract.version !== 1 || !input.executionContract.targetFilePaths.length || !input.executionContract.fileAllowlist.length || !input.executionContract.verificationCommands.length) reasons.push('A versioned execution contract with exact targets and fixed verification commands is required.');
   if (!input.locales.authoritative || !input.locales.source.trim() || input.locales.publicLocales.length === 0) reasons.push('Authoritative public locale evidence is required.');
   if (input.risk === 'High' || input.risk === 'Unknown') reasons.push(`Risk ${input.risk} is not eligible for fixture execution planning.`);
   if (!Number.isSafeInteger(input.policyVersion) || input.policyVersion < 1) reasons.push('A current Controller policy version is required.');
   if (!input.lease.workerId || !input.lease.leaseId || !Number.isSafeInteger(input.lease.fencingToken) || input.lease.fencingToken < 1 || Date.parse(input.lease.expiresAt) <= Date.now()) reasons.push('A current Worker Lease and Fencing Token are required.');
   const timeoutMs = Math.max(30_000, Math.min(20 * 60_000, input.timeoutMs ?? 5 * 60_000));
   const maxRetries = Math.max(0, Math.min(2, Math.floor(input.maxRetries ?? 2)));
+  const executionContract: ExecutionContract | undefined = input.executionContract ? {
+    ...input.executionContract,
+    version: 1,
+    developmentJobId: input.developmentJobId,
+    featureId: input.featureId,
+    project: input.project,
+    featureName: input.featureName,
+    reason: input.reason,
+    inputs: input.inputs,
+    outputs: input.outputs,
+    publicLocales: [...input.locales.publicLocales],
+    risk: input.risk,
+    policyVersion: input.policyVersion,
+    workerLease: input.lease,
+    timeoutMs,
+    maxRetries,
+    localeRequirements: ['Every authoritative public locale has a route and visible translated UI, input, error and result strings.'],
+    seoRequirements: ['Title, description, canonical, hreflang, x-default and robots behavior are verified from build or render evidence.'],
+    sitemapRequirements: ['The new public route is present in generated sitemap output for every public locale.'],
+    testRequirements: ['TypeScript, ESLint, independent unit tests and build pass using fixed pre-approved commands.'],
+  } : undefined;
+  if (executionContract && (executionContract.workspaceRoot !== 'WORKTREE_ROOT' || executionContract.sourceRoot !== 'src' || executionContract.project !== input.project || executionContract.developmentJobId !== input.developmentJobId || executionContract.featureId !== input.featureId || executionContract.policyVersion !== input.policyVersion || executionContract.publicLocales.join('|') !== input.locales.publicLocales.join('|') || executionContract.fileAllowlist.some(pattern => !input.allowedPaths.includes(pattern)))) reasons.push('Execution Contract does not match the Feature Specification, locale evidence, policy, or path allowlist.');
   return {
     planId: randomUUID(),
     ...input,
     timeoutMs,
     maxRetries,
+    executionContract,
     forbiddenPaths: FIXED_FORBIDDEN_PATHS,
     localeRequirements: ['Every authoritative public locale has a route and visible translated UI, input, error and result strings.'],
     seoRequirements: ['Title, description, canonical, hreflang, x-default and robots behavior are verified from build or render evidence.'],
@@ -50,7 +168,7 @@ export type ReleaseReadinessInput = {
   publicLocales: string[];
   localeSource: string;
   localeSourceAuthoritative: boolean;
-  locales: Record<string, { route: boolean; uiStrings: boolean; inputErrorResultStrings: boolean; title: string; description: string; canonical: boolean; hreflang: string[]; xDefault: boolean; robotsVerified: boolean; sitemapContainsRoute: boolean; buildOrRenderEvidence: boolean }>;
+  locales: Record<string, { route: boolean; renderedHtml: boolean; uiStrings: boolean; inputErrorResultStrings: boolean; title: string; description: string; canonical: boolean; hreflang: string[]; xDefault: boolean; robotsVerified: boolean; sitemapContainsRoute: boolean; buildOrRenderEvidence: boolean }>;
 };
 
 export function validateFeatureReleaseReadiness(input: ReleaseReadinessInput) {
@@ -62,6 +180,7 @@ export function validateFeatureReleaseReadiness(input: ReleaseReadinessInput) {
     const row = input.locales[locale];
     if (!row) { failures.push(`${locale}: no feature evidence.`); continue; }
     if (!row.route) failures.push(`${locale}: route missing.`);
+    if (!row.renderedHtml) failures.push(`${locale}: rendered HTML evidence missing.`);
     if (!row.uiStrings || !row.inputErrorResultStrings) failures.push(`${locale}: translated UI/input/error/result strings incomplete.`);
     if (!row.title.trim() || !row.description.trim()) failures.push(`${locale}: title or description missing.`);
     if (!row.canonical) failures.push(`${locale}: canonical not verified.`);
