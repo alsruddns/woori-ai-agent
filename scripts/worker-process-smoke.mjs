@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import Database from 'better-sqlite3';
 
 const repositoryRoot = process.cwd();
 const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'woori-agent-worker-smoke-'));
@@ -69,6 +70,39 @@ async function stopController(child) {
   });
 }
 
+function startLeaseRenewalWorker(lease) {
+  const child = spawn(process.execPath, cliArgs('worker', 'heartbeat-loop', '--interval-seconds=15', `--job-id=${lease.jobId}`, `--lease-id=${lease.leaseId}`, `--fencing-token=${lease.fencingToken}`, `--policy-version=${lease.policyVersion}`), { cwd: repositoryRoot, env: environment, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  let stdout = '';
+  let stderr = '';
+  const watchers = new Set();
+  const observe = chunk => { const text = chunk.toString(); for (const watcher of watchers) if (watcher.pattern.test(text)) watcher.resolve(text); };
+  child.stdout.on('data', chunk => { stdout += chunk.toString(); observe(chunk); });
+  child.stderr.on('data', chunk => { stderr += chunk.toString(); observe(chunk); });
+  const acknowledged = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Worker did not acknowledge a lease renewal.')), 10_000);
+    watchers.add({ pattern: /Heartbeat acknowledged/, resolve: () => { clearTimeout(timer); resolve(); } });
+    child.once('error', error => { clearTimeout(timer); reject(error); });
+    child.once('exit', code => { if (!stdout.includes('Heartbeat acknowledged')) { clearTimeout(timer); reject(new Error(`Lease Worker ${lease.jobId} exited before acknowledgement (${code}): ${stderr.slice(-1000)}`)); } });
+  });
+  acknowledged.catch(() => {});
+  const waitFor = (pattern, timeoutMs = 10_000) => new Promise((resolve, reject) => {
+    if (pattern.test(stdout) || pattern.test(stderr)) { resolve(`${stdout}\n${stderr}`); return; }
+    const watcher = { pattern, resolve: text => { clearTimeout(timer); watchers.delete(watcher); resolve(text); } };
+    watchers.add(watcher);
+    const timer = setTimeout(() => { watchers.delete(watcher); reject(new Error(`Worker did not report ${pattern}.`)); }, timeoutMs);
+  });
+  return { child, acknowledged, waitFor, output: () => ({ stdout, stderr }) };
+}
+
+async function stopWorker(child) {
+  if (!child || child.exitCode !== null) return;
+  child.kill('SIGTERM');
+  await new Promise(resolve => {
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* The test process may already have exited. */ } resolve(); }, 1000);
+    child.once('exit', () => { clearTimeout(timer); resolve(); });
+  });
+}
+
 let controller;
 try {
   controller = await startController();
@@ -82,15 +116,59 @@ try {
     idempotencyKey: `worker-smoke:${randomUUID()}`, title: 'Temporary read-only Worker integration check',
   }, databasePath);
   approveControllerJob(readOnlyJob.globalJobId, databasePath);
-  const claim = await runWorker(['claim']);
+  const claim = await runWorker(['claim', `--job-id=${readOnlyJob.globalJobId}`, '--lease-ms=60000']);
   const lease = claim.result;
   if (!lease?.leaseId || !Number.isSafeInteger(lease.fencingToken)) throw new Error('Controller did not issue a valid Worker lease.');
 
   const transitions = [];
-  for (const status of ['Running', 'Testing', 'Completed']) {
+  for (const status of ['Running']) {
     const transition = await runWorker(['transition', `--job-id=${lease.jobId}`, `--lease-id=${lease.leaseId}`, `--fencing-token=${lease.fencingToken}`, `--policy-version=${lease.policyVersion}`, `--status=${status}`]);
     transitions.push(transition.result?.status ?? status);
   }
+
+  const leaseDb = new Database(databasePath, { readonly: true, fileMustExist: true });
+  const expiryBeforeRenewal = leaseDb.prepare('SELECT expires_at AS expiresAt FROM controller_jobs WHERE global_job_id=?').get(lease.jobId).expiresAt;
+  leaseDb.close();
+  const leaseWorker = startLeaseRenewalWorker(lease);
+  try {
+    await leaseWorker.acknowledged;
+    const renewedDb = new Database(databasePath, { readonly: true, fileMustExist: true });
+    const expiryAfterRenewal = renewedDb.prepare('SELECT expires_at AS expiresAt FROM controller_jobs WHERE global_job_id=?').get(lease.jobId).expiresAt;
+    renewedDb.close();
+    if (Date.parse(expiryAfterRenewal) < Date.now() + 30_000 || expiryAfterRenewal === expiryBeforeRenewal) throw new Error('Worker acknowledged but Controller did not persist a fresh lease expiry.');
+    transitions.push('Lease Renewed');
+  } finally {
+    await stopWorker(leaseWorker.child);
+  }
+  for (const status of ['Testing', 'Completed']) {
+    const transition = await runWorker(['transition', `--job-id=${lease.jobId}`, `--lease-id=${lease.leaseId}`, `--fencing-token=${lease.fencingToken}`, `--policy-version=${lease.policyVersion}`, `--status=${status}`]);
+    transitions.push(transition.result?.status ?? status);
+  }
+
+  const expiredJob = submitControllerJob({
+    service: 'quiz', kind: 'expired-lease-validation', workClass: 'analysis', requiredOs: 'windows',
+    idempotencyKey: `worker-smoke-expired:${randomUUID()}`, title: 'Temporary expired lease rejection check',
+  }, databasePath);
+  approveControllerJob(expiredJob.globalJobId, databasePath);
+  const expiredClaim = await runWorker(['claim', `--job-id=${expiredJob.globalJobId}`, '--lease-ms=60000']);
+  const expiredLease = expiredClaim.result;
+  const expireDb = new Database(databasePath);
+  expireDb.prepare('UPDATE controller_jobs SET expires_at=? WHERE global_job_id=?').run(new Date(Date.now() - 1000).toISOString(), expiredLease.jobId);
+  expireDb.close();
+  const expiredWorker = startLeaseRenewalWorker(expiredLease);
+  let expiredLeaseRejected = false;
+  try {
+    const rejection = await expiredWorker.waitFor(/LEASE_REJECTED/, 10_000);
+    expiredLeaseRejected = rejection.includes('LEASE_REJECTED');
+  } finally {
+    await stopWorker(expiredWorker.child);
+  }
+  const expiredStateDb = new Database(databasePath, { readonly: true, fileMustExist: true });
+  const expiredState = expiredStateDb.prepare('SELECT status,expires_at AS expiresAt FROM controller_jobs WHERE global_job_id=?').get(expiredLease.jobId);
+  expiredStateDb.close();
+  if (!expiredLeaseRejected || Date.parse(expiredState.expiresAt) >= Date.now()) throw new Error('Worker did not stop after the Controller rejected its expired lease.');
+  const { recoverExpiredControllerJob } = await import(pathToFileURL(path.join(repositoryRoot, 'apps/cli/src/distributed-queue.ts')).href);
+  recoverExpiredControllerJob({ jobId: expiredLease.jobId, processTerminated: true, verifiedBy: 'worker-process-smoke', evidence: 'Isolated Worker heartbeat process stopped after the Controller rejected an expired lease.' }, databasePath);
 
   const snapshot = controllerDashboardSnapshot(databasePath);
   const sameWorker = snapshot.workers.filter((worker) => worker.workerId === workerId);
@@ -100,25 +178,63 @@ try {
     idempotencyKey: `worker-smoke-code-block:${randomUUID()}`, title: 'Temporary code-change policy gate check',
   }, databasePath);
   approveControllerJob(blockedCodeChange.globalJobId, databasePath);
-  const deniedClaim = await runWorker(['claim']);
+  let codeChangeBlocked = false;
+  try {
+    const deniedClaim = await runWorker(['claim', `--job-id=${blockedCodeChange.globalJobId}`]);
+    codeChangeBlocked = deniedClaim.result === null;
+  } catch (error) {
+    if (!(error instanceof Error) || !/code-change claims are restricted|POLICY_BLOCKED/i.test(error.message)) throw error;
+    codeChangeBlocked = true;
+  }
 
-  const { getAgentPolicy, updateAgentPolicy } = await import(pathToFileURL(path.join(repositoryRoot, 'apps/cli/src/agent-policy.ts')).href);
-  const beforeEmergencyStop = getAgentPolicy(databasePath);
-  const emergencyStop = updateAgentPolicy({
-    expectedVersion: beforeEmergencyStop.version,
-    actor: 'worker-process-smoke',
-    reason: 'Verify emergency stop through a real authenticated Worker process',
-    patch: { emergencyStop: true },
-  }, databasePath);
-  if (emergencyStop.conflict) throw new Error('Could not set isolated test emergency stop policy.');
-  await runWorker(['policy']);
   const emergencyStopJob = submitControllerJob({
     service: 'quiz', kind: 'read-only-emergency-stop-check', workClass: 'analysis', requiredOs: 'windows',
     idempotencyKey: `worker-smoke-emergency-stop:${randomUUID()}`, title: 'Temporary emergency stop claim check',
   }, databasePath);
   approveControllerJob(emergencyStopJob.globalJobId, databasePath);
+  const emergencyClaim = await runWorker(['claim', `--job-id=${emergencyStopJob.globalJobId}`, '--lease-ms=60000']);
+  const emergencyLease = emergencyClaim.result;
+  await runWorker(['transition', `--job-id=${emergencyLease.jobId}`, `--lease-id=${emergencyLease.leaseId}`, `--fencing-token=${emergencyLease.fencingToken}`, `--policy-version=${emergencyLease.policyVersion}`, '--status=Running']);
+  const emergencyWorker = startLeaseRenewalWorker(emergencyLease);
+  let emergencyPolicyVersion = 0;
+  let expiryAtEmergencyStop = '';
+  try {
+    await emergencyWorker.acknowledged;
+    const beforeStopDb = new Database(databasePath, { readonly: true, fileMustExist: true });
+    expiryAtEmergencyStop = beforeStopDb.prepare('SELECT expires_at AS expiresAt FROM controller_jobs WHERE global_job_id=?').get(emergencyLease.jobId).expiresAt;
+    beforeStopDb.close();
+    const { getAgentPolicy, updateAgentPolicy } = await import(pathToFileURL(path.join(repositoryRoot, 'apps/cli/src/agent-policy.ts')).href);
+    const beforeEmergencyStop = getAgentPolicy(databasePath);
+    const emergencyStop = updateAgentPolicy({
+      expectedVersion: beforeEmergencyStop.version,
+      actor: 'worker-process-smoke',
+      reason: 'Verify emergency stop through an active authenticated Worker process',
+      patch: { emergencyStop: true },
+    }, databasePath);
+    if (emergencyStop.conflict) throw new Error('Could not set isolated test emergency stop policy.');
+    emergencyPolicyVersion = emergencyStop.policy.version;
+    const stopped = await emergencyWorker.waitFor(/POLICY_CHANGED|LEASE_REJECTED/, 20_000);
+    if (!/POLICY_CHANGED|LEASE_REJECTED/.test(stopped) || emergencyPolicyVersion <= emergencyLease.policyVersion) throw new Error('The active Worker did not stop after Emergency Stop changed the policy version.');
+  } finally {
+    await stopWorker(emergencyWorker.child);
+  }
+  const afterStopDb = new Database(databasePath, { readonly: true, fileMustExist: true });
+  const expiryAfterPolicyStop = afterStopDb.prepare('SELECT expires_at AS expiresAt FROM controller_jobs WHERE global_job_id=?').get(emergencyLease.jobId).expiresAt;
+  afterStopDb.close();
+  let emergencyStopBlocksActiveTransition = false;
+  try { await runWorker(['transition', `--job-id=${emergencyLease.jobId}`, `--lease-id=${emergencyLease.leaseId}`, `--fencing-token=${emergencyLease.fencingToken}`, `--policy-version=${emergencyLease.policyVersion}`, '--status=Completed']); }
+  catch (error) {
+    if (!(error instanceof Error) || !/POLICY_BLOCKED|POLICY_VERSION_STALE/.test(error.message)) throw error;
+    emergencyStopBlocksActiveTransition = true;
+  }
+  const emergencyDb = new Database(databasePath);
+  emergencyDb.prepare('UPDATE controller_jobs SET expires_at=? WHERE global_job_id=?').run(new Date(Date.now() - 1000).toISOString(), emergencyLease.jobId);
+  emergencyDb.close();
+  recoverExpiredControllerJob({ jobId: emergencyLease.jobId, processTerminated: true, verifiedBy: 'worker-process-smoke', evidence: 'Emergency Stop terminated the isolated Worker heartbeat process; transition remained blocked.' }, databasePath);
+  const blockedNewClaimJob = submitControllerJob({ service: 'quiz', kind: 'emergency-stop-claim-check', workClass: 'analysis', requiredOs: 'windows', idempotencyKey: `worker-smoke-emergency-claim:${randomUUID()}`, title: 'Temporary Emergency Stop new claim check' }, databasePath);
+  approveControllerJob(blockedNewClaimJob.globalJobId, databasePath);
   let emergencyStopBlocksNewClaim = false;
-  try { await runWorker(['claim']); }
+  try { await runWorker(['claim', `--job-id=${blockedNewClaimJob.globalJobId}`]); }
   catch (error) {
     if (!(error instanceof Error) || !/POLICY_BLOCKED/.test(error.message)) throw error;
     emergencyStopBlocksNewClaim = true;
@@ -143,7 +259,11 @@ try {
     lease: { status: lease.status, fencingTokenIssued: Number.isSafeInteger(lease.fencingToken), jobId: lease.jobId },
     transitions,
     finalJobStatus: snapshot.jobs.find((job) => job.globalJobId === lease.jobId)?.status,
-    codeChangeBlockedUnderDefaultPolicy: deniedClaim.result === null,
+    expiredLeaseRejectedByWorkerProcess: expiredLeaseRejected,
+    codeChangeBlockedUnderDefaultPolicy: codeChangeBlocked,
+    emergencyStopBlocksActiveTransition,
+    activeWorkerStoppedOnNewPolicyVersion: emergencyPolicyVersion > emergencyLease.policyVersion,
+    leaseNotRenewedAfterEmergencyStop: expiryAfterPolicyStop === expiryAtEmergencyStop,
     emergencyStopBlocksNewClaim,
     reconnectState: reconnected.result?.state,
     workerCountAfterReconnect: afterReconnect.workers.filter((worker) => worker.workerId === workerId).length,
