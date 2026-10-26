@@ -23,6 +23,15 @@ describe('project development locks and selection',()=>{
   expect(result.projects.find(row=>row.projectId==='quiz')?.integrationRisk).toBe('NoneObserved');
   const db=new Database(files.audit,{readonly:true});const job=db.prepare("SELECT job_uuid FROM development_audit_jobs WHERE source_key='project-lock-default:tools:phase11c31'").get() as {job_uuid:string};db.close();expect(verifyDevelopmentAuditChain(job.job_uuid,files.audit).valid).toBe(true);
  });
+ it('keeps dashboard project checks fast and explicitly unverified without authorizing work',()=>{
+  const files=temp();
+  const result=evaluateCurrentProjectSelection({databasePath:files.controller,auditDatabasePath:files.audit,inspectionMode:'dashboard',recordAudit:false});
+  expect(result.selectedProject).toBeNull();
+  expect(result.locks.find(row=>row.projectId==='quiz')).toMatchObject({state:'LOCKED_UNVERIFIED',repositoryVerified:false,workingTreeClean:null,remoteDevelopSha:null,workspaceIsolationStatus:'Unverified',integrationRisk:'Unknown',developmentPolicyAllowed:false,codexExecutionAllowed:false});
+  expect(result.locks.find(row=>row.projectId==='quiz')?.reason).toMatch(/Dashboard summary only/);
+  expect(result.evaluated.every(row=>row.status==='Skipped')).toBe(true);
+  expect(result.locks.find(row=>row.projectId==='tools')?.state).toBe('LOCKED_EXTERNAL_DEVELOPMENT');
+ });
  it('retains manual locks, uses optimistic lock versions, and prevents unlocking Calculator',()=>{
   const files=temp();ensureProjectDevelopmentLockSchema(files.controller,files.audit);const before=listProjectDevelopmentLocks({databasePath:files.controller,auditDatabasePath:files.audit,repositoryStates:repoStates()});
   const locked=changeProjectDevelopmentLock({projectId:'quiz',action:'lock',expectedVersion:before.version,actor:'test-admin',reason:'Protect ongoing quiz work.'},{databasePath:files.controller,auditDatabasePath:files.audit,repositoryStates:repoStates()});
