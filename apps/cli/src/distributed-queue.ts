@@ -211,12 +211,14 @@ export function approveControllerJob(jobId: string, dbPath?: string) {
   }); const result = tx.immediate(); db.close(); return result;
 }
 
-export function claimControllerJob(workerId: string, leaseMs = 60_000, dbPath?: string, provisionedPolicy?: ControllerWorkerPolicy, projectGuard?: { lockVersion:number; availableProjects:string[];policyVersion?:number }): Lease | null {
+export function claimControllerJob(workerId: string, leaseMs = 60_000, dbPath?: string, provisionedPolicy?: ControllerWorkerPolicy, projectGuard?: { lockVersion:number; availableProjects:string[];policyVersion?:number }, onlyJobId?: string): Lease | null {
   const db = openControllerDb(dbPath); const stamp = Date.now(); const tx = db.transaction(() => {
     const worker = db.prepare('SELECT * FROM controller_workers WHERE worker_id=?').get(workerId) as any;
     const activeWorkerJob = db.prepare("SELECT 1 FROM controller_jobs WHERE worker_id=? AND status IN ('Claimed','Running','Testing') LIMIT 1").get(workerId);
     if (!worker || worker.state === 'Disabled' || worker.available_memory_bytes < MIN_WORKER_MEMORY_BYTES || Date.parse(worker.heartbeat_at) < stamp - 45_000 || worker.current_job_id || activeWorkerJob || provisionedPolicy && (provisionedPolicy.os !== worker.os || provisionedPolicy.allowCodeChanges !== Boolean(worker.allow_code_changes))) return null;
-    const jobs = db.prepare("SELECT * FROM controller_jobs WHERE status='Ready' AND (required_os='any' OR required_os=?) ORDER BY created_at,global_job_id LIMIT 20").all(worker.os) as any[];
+    const jobs = onlyJobId
+      ? db.prepare("SELECT * FROM controller_jobs WHERE status='Ready' AND global_job_id=? AND (required_os='any' OR required_os=?)").all(onlyJobId, worker.os) as any[]
+      : db.prepare("SELECT * FROM controller_jobs WHERE status='Ready' AND (required_os='any' OR required_os=?) ORDER BY created_at,global_job_id LIMIT 20").all(worker.os) as any[];
     for (const job of jobs) {
       let claimServicePolicy: AgentPolicy['services'][keyof AgentPolicy['services']] | undefined;
       if(job.work_class==='code_change'){
@@ -355,13 +357,15 @@ export function controllerDashboardSnapshot(dbPath?: string, staleAfterMs = 45_0
   const ackTable=Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='worker_policy_acknowledgements'").get());
   const workerPolicyAcknowledgements=ackTable?db.prepare('SELECT worker_id AS workerId,policy_version AS policyVersion,acknowledged_at AS acknowledgedAt FROM worker_policy_acknowledgements ORDER BY worker_id').all():[];
   const workerFresh = workers.filter(worker => worker.state !== 'Offline' && worker.state !== 'Disabled').length;
-  db.close(); return { controller: 'Local SQLite Controller', configured: true, policyVersion:policy?.version??null,workerRegistration: workers.length ? 'Configured' : 'Not Configured', online: workerFresh > 0, checkedAt: nowIso(), utcDate:utcDay,workers,workerPolicyAcknowledgements,developmentLimits,policyBlocks,jobs, events, counts: { workers: workers.length, onlineWorkers: workerFresh, queued: jobs.filter(job => ['Discovered', 'Ready'].includes(job.status)).length, active: jobs.filter(job => ACTIVE.includes(job.status as typeof ACTIVE[number])).length, completed: jobs.filter(job => job.status === 'Completed').length, failed: jobs.filter(job => job.status === 'Failed').length } };
+  let controllerRuntime:{status:string;instanceId?:string;heartbeatAt?:string;reason?:string}={status:'Offline',reason:'No recent Controller process heartbeat.'};
+  try { const exists=db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_meta'").get();const row=exists?db.prepare("SELECT value FROM scheduler_meta WHERE key='controller'").get() as {value:string}|undefined:undefined;if(row){const parsed=JSON.parse(row.value);const fresh=parsed.status==='Online'&&Date.now()-Date.parse(parsed.heartbeatAt)<45_000;controllerRuntime=fresh?{status:'Online',instanceId:parsed.instanceId,heartbeatAt:parsed.heartbeatAt}:{status:'Offline',heartbeatAt:parsed.heartbeatAt,reason:'Controller heartbeat is stale.'};}}catch{controllerRuntime={status:'Unknown',reason:'Controller heartbeat metadata could not be read.'};}
+  db.close(); return { controller: 'Local SQLite Controller', controllerRuntime, configured: true, policyVersion:policy?.version??null,workerRegistration: workers.length ? 'Configured' : 'Not Configured', online: workerFresh > 0, checkedAt: nowIso(), utcDate:utcDay,workers,workerPolicyAcknowledgements,developmentLimits,policyBlocks,jobs, events, counts: { workers: workers.length, onlineWorkers: workerFresh, queued: jobs.filter(job => ['Discovered', 'Ready'].includes(job.status)).length, active: jobs.filter(job => ACTIVE.includes(job.status as typeof ACTIVE[number])).length, completed: jobs.filter(job => job.status === 'Completed').length, failed: jobs.filter(job => job.status === 'Failed').length } };
 }
 
 export function controllerJobStatuses(jobIds: string[], dbPath?: string) {
   if (!Array.isArray(jobIds) || jobIds.length > 200 || jobIds.some(id => typeof id !== 'string' || id.length > 80)) throw new Error('Invalid status query.');
   if (!jobIds.length) return [];
   const db = openControllerDb(dbPath); const placeholders = jobIds.map(() => '?').join(',');
-   const rows = db.prepare(`SELECT global_job_id AS globalJobId,status,worker_id AS workerId,lease_id AS leaseId,fencing_token AS fencingToken,expires_at AS expiresAt,updated_at AS updatedAt,service,work_class AS workClass,project_lock_version AS projectLockVersion,policy_version AS policyVersion FROM controller_jobs WHERE global_job_id IN (${placeholders})`).all(...jobIds);
+  const rows = db.prepare(`SELECT global_job_id AS globalJobId,local_task_id AS localTaskId,status,worker_id AS workerId,lease_id AS leaseId,fencing_token AS fencingToken,expires_at AS expiresAt,updated_at AS updatedAt,service,kind,work_class AS workClass,required_os AS requiredOs,title,evidence,complexity_score AS complexity,project_lock_version AS projectLockVersion,policy_version AS policyVersion FROM controller_jobs WHERE global_job_id IN (${placeholders})`).all(...jobIds);
   db.close(); return rows;
 }

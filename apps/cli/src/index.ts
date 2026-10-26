@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config, agents, discover, inspect, serviceFor, writeReports, startRun, finishRun, saveFindings, saveFeatureResults, type Check, type Finding, type FeatureResult } from './core.js';
@@ -27,6 +28,11 @@ import { decideLinuxReadOnlyWork, linuxResourcePolicy, sampleLinuxResources } fr
 import {discoverFeatureCandidates,generateFeatureSpecification,listFeatureFactoryData} from './feature-factory.js';
 import {runFeatureFactoryFixture} from './feature-fixture-runner.js';
 import {revalidateFeatureExecution} from './feature-revalidation.js';
+import {dispatchClaimedControllerJob} from './development-dispatcher.js';
+import {createDevelopmentAuditJob,appendDevelopmentAuditEvent} from './development-audit.js';
+import {createIsolatedAgentClone,readAllowlistedRemoteDevelopSha,codexInvocationBudget} from './project-development-locks.js';
+import {startWindowsReadOnlyWorker,stopWindowsReadOnlyWorker,windowsWorkerRuntimeStatus,runWindowsReadOnlyIntegrationSmoke} from './windows-worker-runtime.js';
+import {reserveCodexInvocation,finishCodexInvocation,listCodexInvocations} from './codex-invocations.js';
 
 const args=process.argv.slice(2); const command=args[0]??'help';
 const option=(name:string,fallback:string)=>args.find(a=>a.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
@@ -107,6 +113,14 @@ async function main(){
  }
  if(command==='worker'){
   const action=args[1]??'status';
+  if(action==='service'){
+   const operation=args[2]??'status';
+   if(operation==='start'){console.log(JSON.stringify(await startWindowsReadOnlyWorker(),null,2));return;}
+   if(operation==='status'){console.log(JSON.stringify(await windowsWorkerRuntimeStatus(),null,2));return;}
+   if(operation==='stop'){console.log(JSON.stringify(await stopWindowsReadOnlyWorker(),null,2));return;}
+   if(operation==='integration-smoke'){console.log(JSON.stringify(runWindowsReadOnlyIntegrationSmoke(option('approve','false')==='true'),null,2));return;}
+   throw new Error('Worker service commands: start | status | stop');
+  }
   if(action==='heartbeat-loop'){
    const workerId=process.env.WOORI_CONTROLLER_WORKER_ID??'',hostLabel=process.env.WOORI_CONTROLLER_HOST_LABEL??'';
    if(!workerId||!hostLabel)throw new Error('Set a stable Worker ID and a non-identifying WOORI_CONTROLLER_HOST_LABEL.');
@@ -120,9 +134,10 @@ async function main(){
     try{
      const input=workerHeartbeatInput(hostLabel,jobId||null,jobId?'Running':'Idle',lastErrorCode,readiness);
      if(first&&!jobId)await registerWorkerWithController(input);else await heartbeatWorkerWithController(input);first=false;
+     const syncedPolicy=await controllerWorkerRequest<{version:number}>('/v1/policy/current',{});
      if(jobId){const current=await controllerWorkerRequest<{version:number}>('/v1/policy/current',{});if(current.version!==Number(policyVersionRaw))throw new Error(`POLICY_VERSION_STALE:${current.version}`);await controllerWorkerRequest('/v1/leases/renew',{jobId,leaseId,fencingToken:Number(fencingTokenRaw),policyVersion:Number(policyVersionRaw),leaseMs:intervalSeconds*3000});}
      lastErrorCode=null;
-     console.log(JSON.stringify({workerId,platform:platformAdaptersRuntime(),status:'Heartbeat acknowledged',currentJobId:jobId||null,at:new Date().toISOString()}));
+     console.log(JSON.stringify({workerId,platform:platformAdaptersRuntime(),status:'Heartbeat acknowledged',policyVersion:syncedPolicy.version,currentJobId:jobId||null,at:new Date().toISOString()}));
     }catch(error){
      const stale=error instanceof Error&&/stale|expired|fencing|lease/i.test(error.message),policyChanged=error instanceof Error&&/policy_version|policy_blocked/i.test(error.message);
      console.error(JSON.stringify({workerId,status:stale||policyChanged?'Lease or policy rejected; stopping':'Controller unavailable; no offline claim attempted',errorCode:stale?'LEASE_REJECTED':policyChanged?'POLICY_CHANGED':'CONTROLLER_UNAVAILABLE',at:new Date().toISOString()}));
@@ -143,10 +158,71 @@ async function main(){
    console.log(JSON.stringify({result,workerId,platform:adapter},null,2));return;
   }
   if(action==='sync'){console.log(JSON.stringify(await submitWorkerQueueToController(),null,2));return;}
+  if(action==='submit-readonly-smoke'){
+   if(option('create','false')!=='true')throw new Error('Read-only integration job creation requires explicit --create=true.');
+   const workerId=process.env.WOORI_CONTROLLER_WORKER_ID??'';if(!workerId)throw new Error('A configured Worker identity is required.');
+   const result=await controllerWorkerRequest('/v1/jobs/submit',{service:'quiz',kind:'worker-integration-smoke',workClass:'analysis',requiredOs:'windows',idempotencyKey:`worker-smoke:${workerId}:${randomUUID()}`,title:'Read-only Windows Worker Controller integration check',evidence:'Synthetic local health endpoint only; no service data or source code is accessed.'});
+   console.log(JSON.stringify(result,null,2));return;
+  }
   if(action==='policy'){console.log(JSON.stringify(await controllerWorkerRequest('/v1/policy/current',{}),null,2));return;}
   if(action==='claim'){const current=await controllerWorkerRequest<{version:number;projectDevelopment:{lockVersion:number;availableProjects:string[]}}>('/v1/policy/current',{});const result=await controllerWorkerRequest('/v1/jobs/claim',{policyVersion:current.version,projectLockVersion:current.projectDevelopment.lockVersion,leaseMs:Number(option('lease-ms','60000'))});console.log(JSON.stringify({observedPolicyVersion:current.version,observedProjectLockVersion:current.projectDevelopment.lockVersion,result},null,2));return;}
+  if(action==='dispatch-once'){
+   const jobId=option('job-id','');if(!jobId)throw new Error('Dispatch requires one explicit --job-id; the Worker never drains the queue.');
+   if(option('execute','false')!=='true')throw new Error('Explicit one-job dispatch is required: repeat with --execute=true after reviewing the read-only job.');
+   const rows=await controllerWorkerRequest<any[]>('/v1/jobs/status',{jobIds:[jobId]});const row=rows[0];
+   if(!row){console.log(JSON.stringify({status:'Not Found',jobId}));process.exitCode=2;return;}
+   const readOnlySmoke=row.workClass==='analysis'&&row.kind==='worker-integration-smoke';
+   const featureJob=row.workClass==='code_change'&&['quiz','docs','tools'].includes(row.service)&&row.kind==='feature-development';
+   if(!readOnlySmoke&&!featureJob){console.log(JSON.stringify({status:'Blocked',jobId,reason:'Only a selected read-only integration smoke job or an allowlisted feature-development job can be dispatched.'}));process.exitCode=2;return;}
+   const current=await controllerWorkerRequest<any>('/v1/policy/current',{});
+   const lease=await controllerWorkerRequest<any>('/v1/jobs/claim',{jobId,policyVersion:current.version,projectLockVersion:current.projectDevelopment.lockVersion,leaseMs:60_000});
+   if(!lease){console.log(JSON.stringify({status:'Not Claimable',jobId,policyVersion:current.version}));return;}
+   const audit=createDevelopmentAuditJob({kind:readOnlySmoke?'Maintenance':'Feature',service:row.service,title:readOnlySmoke?'Windows Worker read-only dispatch verification':row.title,reason:readOnlySmoke?'Explicit local integration check for authenticated claim, lease, heartbeat and read-only completion.':'Explicitly selected Controller feature job; execution remains subject to the current policy, lease, Worker, project lock, budget, Sandbox and isolated Clone checks.',evidence:{controllerJobId:jobId,localTaskId:row.localTaskId,kind:row.kind},workerId:process.env.WOORI_CONTROLLER_WORKER_ID,priority:'Low',risk:readOnlySmoke?'Low':'Unknown',status:'Running',metadata:{controllerJobId:jobId,localTaskId:row.localTaskId,dispatchMode:readOnlySmoke?'read-only':'feature-development'},sourceKey:`worker-dispatch:${jobId}`,actor:'Worker'});
+   const result=await dispatchClaimedControllerJob<unknown>({jobId:row.globalJobId,localTaskId:row.localTaskId,service:row.service,kind:row.kind,workClass:row.workClass,title:row.title,status:'Claimed',policyVersion:row.policyVersion},{...lease,status:'Claimed'}, {
+    readContext:async(job,activeLease)=>{const latest=await controllerWorkerRequest<any>('/v1/policy/current',{}),self=await controllerWorkerRequest<any>('/v1/workers/self',{});const budget=codexInvocationBudget();return{policy:latest,worker:{os:self.worker.os,allowCodeChanges:self.worker.allowCodeChanges,capabilities:self.worker.capabilities,codexCliStatus:self.worker.codexCliStatus,chatgptLoginStatus:self.worker.chatgptLoginStatus,sandboxStatus:self.worker.sandboxStatus},lease:activeLease,projectUnlocked:latest.projectDevelopment.availableProjects.includes(job.service),invocationBudgetAvailable:budget.available,auditReady:fs.existsSync(path.resolve(process.env.WOORI_AGENT_DB_PATH??'data/woori-agent.sqlite')),explicitExecutionRequest:option('execute','false')==='true',jobAllowlisted:job.jobId===jobId};},
+    assertLease:async(job,activeLease)=>{const check=await controllerWorkerRequest<{valid:boolean}>('/v1/leases/assert',{jobId:job.jobId,leaseId:activeLease.leaseId,fencingToken:activeLease.fencingToken,policyVersion:current.version});return check.valid===true;},
+    transition:async(job,activeLease,status,resultPayload,failureCode)=>{await controllerWorkerRequest('/v1/jobs/transition',{jobId:job.jobId,leaseId:activeLease.leaseId,fencingToken:activeLease.fencingToken,policyVersion:current.version,status,result:resultPayload,failureCode});},
+    executeReadOnly:async()=>{if(!readOnlySmoke)throw new Error('READ_ONLY_HANDLER_NOT_REGISTERED');const response=await fetch('http://127.0.0.1:4174/api/health',{signal:AbortSignal.timeout(3000)});const health=await response.json() as {status?:string;readOnly?:boolean};if(!response.ok||health.status!=='ready'||health.readOnly!==true)throw new Error('DASHBOARD_HEALTH_CHECK_FAILED');return{dashboardApi:'Ready',readOnly:health.readOnly};},
+    executeFeature:async(job,activeLease,dispatchContext)=>{
+     if(!job.localTaskId)throw new Error('FEATURE_TASK_LINK_MISSING');
+     const Database=(await import('better-sqlite3')).default;
+     const dataPath=path.resolve(process.env.WOORI_AGENT_DB_PATH??'data/woori-agent.sqlite'),controllerPath=path.resolve(process.env.WOORI_CONTROLLER_DB_PATH??'data/controller/queue.sqlite');
+     const taskDb=new Database(dataPath,{readonly:true,fileMustExist:true});let task:any;try{task=taskDb.prepare("SELECT task_id,service,details_json FROM development_tasks WHERE task_id=? AND status='Ready'").get(job.localTaskId);}finally{taskDb.close();}
+     if(!task||task.service!==job.service)throw new Error('FEATURE_TASK_NOT_READY');
+     let details:any;try{details=JSON.parse(task.details_json??'{}');}catch{throw new Error('FEATURE_TASK_METADATA_INVALID');}
+     const contract=details.executionContract;if(!contract||contract.project!==job.service||contract.developmentJobId!==job.localTaskId||!Array.isArray(contract.fileAllowlist)||!contract.fileAllowlist.length)throw new Error('FEATURE_EXECUTION_CONTRACT_MISSING');
+     const repository=listDevelopmentRepositories().find(item=>item.id===job.service);if(!repository||repository.writeLocked||!repository.codeAutomationEnabled)throw new Error('SERVICE_REPOSITORY_POLICY_BLOCKED');
+     const workspaceRoot=path.resolve(os.homedir(),'.woori-ai-agent','agent-workspaces');
+     if(!await controllerWorkerRequest<{valid:boolean}>('/v1/leases/assert',{jobId:activeLease.jobId,leaseId:activeLease.leaseId,fencingToken:activeLease.fencingToken,service:job.service,policyVersion:dispatchContext.policy.version,requireCodeChange:true}).then(result=>result.valid===true))throw new Error('LEASE_REJECTED');
+     const invocationBudget=codexInvocationBudget(dataPath),servicePolicy=dispatchContext.policy.services[job.service as keyof typeof dispatchContext.policy.services];
+     if(!invocationBudget.available)throw new Error('CODEX_INVOCATION_BUDGET_BLOCKED');
+     const invocation=reserveCodexInvocation({databasePath:dataPath,developmentJobId:job.jobId,workerId:activeLease.workerId,platform:'win32',featureId:contract.featureId,attemptNumber:1,invocationType:`worker-feature:${job.jobId}`,maxPerJob:servicePolicy.maximumRetryCount+1,maxPerDay:invocationBudget.limit,maxConcurrent:1});
+     const finishUnstartedInvocation=()=>{const stored=(listCodexInvocations(dataPath,200) as Array<{invocationId:string;executionStatus:string}>).find(item=>item.invocationId===invocation.invocationId);if(stored?.executionStatus==='Reserved')finishCodexInvocation(invocation,{status:'Not Started',retryReason:'Dispatcher preflight stopped before Codex process creation.'});};
+     try {
+     const cloneDb=new Database(controllerPath,{readonly:true,fileMustExist:true});let clone:any;try{if(cloneDb.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_clone_workspaces'").get())clone=cloneDb.prepare("SELECT workspace_path AS workspacePath,repository_url AS repositoryUrl,base_sha AS baseSha,branch,state FROM agent_clone_workspaces WHERE service=? AND job_id IN (?,?) ORDER BY created_at DESC LIMIT 1").get(job.service,job.localTaskId,job.jobId);}finally{cloneDb.close();}
+     if(!clone){const remote=readAllowlistedRemoteDevelopSha(job.service as 'quiz'|'docs'|'tools');if(details.baseSha&&details.baseSha.toLowerCase()!==remote.baseSha.toLowerCase())throw new Error('FEATURE_BASE_SHA_STALE');createIsolatedAgentClone({repositoryUrl:remote.repositoryUrl,service:job.service as 'quiz'|'docs'|'tools',baseSha:remote.baseSha,workspaceRoot,jobId:job.localTaskId,authorization:{jobId:job.jobId,workerId:activeLease.workerId,projectLockVersion:current.projectDevelopment.lockVersion,policyVersion:dispatchContext.policy.version,leaseId:activeLease.leaseId,fencingToken:activeLease.fencingToken}});const refreshed=new Database(controllerPath,{readonly:true,fileMustExist:true});try{clone=refreshed.prepare("SELECT workspace_path AS workspacePath,repository_url AS repositoryUrl,base_sha AS baseSha,branch,state FROM agent_clone_workspaces WHERE service=? AND job_id=?").get(job.service,job.localTaskId);}finally{refreshed.close();}}
+     if(!clone||clone.state!=='Ready')throw new Error('ISOLATED_CLONE_NOT_READY');
+     const workspacePath=path.resolve(clone.workspacePath),realRoot=fs.realpathSync(workspaceRoot),realWorkspace=fs.realpathSync(workspacePath);
+     if(!realWorkspace.startsWith(`${realRoot}${path.sep}`)||fs.lstatSync(workspacePath).isSymbolicLink())throw new Error('ISOLATED_CLONE_PATH_INVALID');
+     const head=execFileSync('git',['-C',realWorkspace,'rev-parse','HEAD'],{encoding:'utf8',windowsHide:true,timeout:5000}).trim();
+     const origin=execFileSync('git',['-C',realWorkspace,'remote','get-url','origin'],{encoding:'utf8',windowsHide:true,timeout:5000}).trim();
+     const branch=execFileSync('git',['-C',realWorkspace,'branch','--show-current'],{encoding:'utf8',windowsHide:true,timeout:5000}).trim();
+     const status=execFileSync('git',['-C',realWorkspace,'status','--porcelain=v1','-z','--untracked-files=all'],{encoding:'utf8',windowsHide:true,timeout:5000});
+     if(head.toLowerCase()!==String(clone.baseSha).toLowerCase()||origin!==clone.repositoryUrl||branch!==clone.branch||status.length)throw new Error('ISOLATED_CLONE_INTEGRITY_FAILED');
+     const executorRepository={...repository,localPath:realWorkspace,repositoryVerified:true,worktreeEligible:true,dirtyFileCount:0,writeLocked:false,lockReason:undefined};
+     const assertCurrentCodeLease=async()=>{const check=await controllerWorkerRequest<{valid:boolean}>('/v1/leases/assert',{jobId:activeLease.jobId,leaseId:activeLease.leaseId,fencingToken:activeLease.fencingToken,service:job.service,policyVersion:dispatchContext.policy.version,requireCodeChange:true});return check.valid===true;};
+     const result=await executeApprovedTask({taskId:job.localTaskId,approved:true,allowedPaths:contract.fileAllowlist.join(','),timeoutMs:servicePolicy.maximumCodexExecutionTimeSeconds*1000,maxRetries:servicePolicy.maximumRetryCount,expectedPolicyVersion:dispatchContext.policy.version,controllerDbPath:controllerPath,executionContract:contract,preReservedInvocation:invocation,auditContext:{workerId:activeLease.workerId,controllerId:'local-controller',fencingToken:activeLease.fencingToken,leaseJobId:activeLease.jobId,correlationId:job.jobId},repositoryOverride:executorRepository,leaseIsCurrent:assertCurrentCodeLease,executionGuard:async()=>{try{const latest=await controllerWorkerRequest<any>('/v1/policy/current',{}),latestService=latest.services?.[job.service];if(latest.version!==dispatchContext.policy.version||latest.emergencyStop||latest.mode==='PAUSED'||!latest.globalAutomationEnabled||!latest.global?.autonomousFeatureDevelopment||!latest.global?.codexExecution||!latestService?.featureDevelopment||!latestService?.codex)return'POLICY_OR_PERMISSION_CHANGED';await controllerWorkerRequest('/v1/leases/renew',{jobId:activeLease.jobId,leaseId:activeLease.leaseId,fencingToken:activeLease.fencingToken,policyVersion:dispatchContext.policy.version,leaseMs:60_000});if(!await assertCurrentCodeLease())return'LEASE_OR_FENCING_REJECTED';return null;}catch{return'POLICY_OR_LEASE_RENEWAL_FAILED';}}});
+     finishUnstartedInvocation();
+     if(result.status!=='Completed')throw new Error('CODEX_EXECUTION_NOT_COMPLETED');
+     return result;
+     } catch(error) { finishUnstartedInvocation(); throw error; }
+    },
+    record:async(type,job,details)=>{appendDevelopmentAuditEvent({jobId:audit.uuid,type,payload:{controllerJobId:job.jobId,...details},actor:'Worker',workerId:process.env.WOORI_CONTROLLER_WORKER_ID,controllerId:'local-controller',fencingToken:lease.fencingToken,leaseJobId:lease.jobId,policyVersion:current.version,correlationId:job.jobId,idempotencyKey:`worker-dispatch:${job.jobId}:${type}`});}
+   });
+   console.log(JSON.stringify({jobId,workerId:process.env.WOORI_CONTROLLER_WORKER_ID,leaseId:lease.leaseId,fencingToken:lease.fencingToken,policyVersion:current.version,auditJobId:audit.id,result},null,2));if(result.status!=='Completed')process.exitCode=2;return;
+  }
   if(action==='transition'){const policyVersionRaw=option('policy-version','');if(!/^\d+$/.test(policyVersionRaw))throw new Error('Worker transitions require the policy version used when the job was claimed.');const result=await controllerWorkerRequest('/v1/jobs/transition',{jobId:option('job-id',''),leaseId:option('lease-id',''),fencingToken:Number(option('fencing-token','0')),policyVersion:Number(policyVersionRaw),status:option('status','Running'),result:{summaryCode:option('summary-code','')||undefined,testsPassed:option('tests-passed','')==='true'?true:undefined,changedFilesCount:option('changed-files','')?Number(option('changed-files','')):undefined},failureCode:option('error-code','')||undefined});console.log(JSON.stringify(result,null,2));return;}
-  throw new Error('Worker commands: register | heartbeat [--job-id=...] | heartbeat-loop [--interval-seconds=30 --job-id=... --lease-id=... --fencing-token=... --policy-version=...] | policy | sync | claim | transition --job-id=... --lease-id=... --fencing-token=... --policy-version=... --status=Running|Testing|Completed|Failed');
+  throw new Error('Worker commands: register | heartbeat [--job-id=...] | heartbeat-loop [--interval-seconds=30 --job-id=... --lease-id=... --fencing-token=... --policy-version=...] | policy | sync | claim | dispatch-once --job-id=... --execute=true | transition --job-id=... --lease-id=... --fencing-token=... --policy-version=... --status=Running|Testing|Completed|Failed');
  }
  if(command==='gsc'){
   const subcommand=args[1]??'run';
@@ -237,7 +313,8 @@ function platformAdaptersRuntime(){return process.platform==='win32'?'windows':p
 function workerHeartbeatInput(hostLabel:string,currentJobId:string|null,executionStatus:string,lastErrorCode:string|null=null,readinessOverride?:any):Omit<ControllerWorkerInput,'workerId'>{
  if(process.platform!=='win32'&&process.platform!=='linux')throw new Error(`Distributed Workers are unsupported on ${process.platform}.`);
  const readiness=readinessOverride??codexReadiness() as any,workerOs:WorkerOs=process.platform==='win32'?'windows':'linux';
- return {os:workerOs,hostLabel,capabilities:['http','qa','seo','content','github-read','lighthouse','playwright',...(workerOs==='windows'&&readiness.executionReady?['codex-write','build']:[])],codexCliStatus:readiness.executionReady?'Ready':'Not Configured',chatgptLoginStatus:String(readiness.auth?.status??'Not Configured'),sandboxStatus:String(readiness.sandbox?.status??'Not Configured'),cpuCount:os.cpus().length,availableMemoryBytes:os.freemem(),currentJobId,executionStatus,lastErrorCode};
+ const codeModificationProvisioned=workerOs==='windows'&&process.env.WOORI_WORKER_CODE_MODIFICATION_ENABLED==='true';
+ return {os:workerOs,hostLabel,capabilities:['http','qa','seo','content','github-read','lighthouse','playwright',...(codeModificationProvisioned&&readiness.executionReady?['codex-write','build']:[])],codexCliStatus:readiness.executionReady?'Ready':'Not Configured',chatgptLoginStatus:String(readiness.auth?.status??'Not Configured'),sandboxStatus:String(readiness.sandbox?.status??'Not Configured'),cpuCount:os.cpus().length,availableMemoryBytes:os.freemem(),currentJobId,executionStatus,lastErrorCode};
 }
 
 function metadataReview(pages:Check[],agent:'seo'|'localization',runId:string){const findings:Finding[]=[];for(const c of pages){const add=(severity:Finding['severity'],title:string,description:string)=>findings.push({id:`${runId}-${agent}-${findings.length+1}`,service:c.service,url:c.url,locale:c.locale,agent,severity,status:'confirmed',title,description});if(agent==='seo'){if(!c.title)add('Medium','Missing title','No document title was observed.');if(!c.description)add('Low','Missing meta description','No meta description was observed.');if(!c.canonical)add('Medium','Missing canonical','No canonical link was observed.');if(c.h1Count!==1)add('Low','Unexpected H1 count',`Expected 1; observed ${c.h1Count}.`);}else{const normalize=(v:string)=>v.toLowerCase().replace('_','-');if(!c.htmlLang)add('Medium','Missing document language','No html lang attribute was observed.');else if(c.locale!=='unknown'&&!normalize(c.htmlLang).startsWith(normalize(c.locale)))add('Medium','Document language mismatch',`Route locale ${c.locale}, html lang=${c.htmlLang}.`);if(!c.hreflangCount)add('Low','No hreflang alternates','No alternate locale links were observed.');}}return{checks:pages,findings};}

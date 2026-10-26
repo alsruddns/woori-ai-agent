@@ -200,6 +200,20 @@ describe('distributed Controller lease safety', () => {
   }finally{await app.close();}
  });
 
+ it('lets a Worker claim one explicit job and read its provisioned capabilities without exposing credentials',async()=>{
+  const file=setup(),token='explicit-dispatch-worker-token-with-over-32-characters';
+  const app=createDistributedControllerServer({host:'127.0.0.1',port:0,dbPath:file,workerTokens:{'worker-dispatch-01':token},workerPolicies:{'worker-dispatch-01':{os:'windows',allowCodeChanges:false}}});await app.listen();const base=`http://127.0.0.1:${(app.server.address() as {port:number}).port}`;
+  try{
+   await request(`${base}/v1/workers/register`,token,'worker-dispatch-01',crypto.randomUUID(),worker('worker-dispatch-01'));
+   const first=submitControllerJob({service:'quiz',kind:'worker-integration-smoke',workClass:'analysis',requiredOs:'windows',idempotencyKey:'dispatch-smoke-first',title:'First synthetic read-only dispatch'},file);const selected=submitControllerJob({service:'quiz',kind:'worker-integration-smoke',workClass:'analysis',requiredOs:'windows',idempotencyKey:'dispatch-smoke-selected',title:'Selected synthetic read-only dispatch'},file);approveControllerJob(first.globalJobId,file);approveControllerJob(selected.globalJobId,file);
+   const policy=await request(`${base}/v1/policy/current`,token,'worker-dispatch-01',crypto.randomUUID(),{});const current=(await policy.json() as any).result;
+   const claim=await request(`${base}/v1/jobs/claim`,token,'worker-dispatch-01',crypto.randomUUID(),{jobId:selected.globalJobId,policyVersion:current.version,projectLockVersion:current.projectDevelopment.lockVersion,leaseMs:60_000});const lease=(await claim.json() as any).result;expect(claim.status).toBe(200);expect(lease.jobId).toBe(selected.globalJobId);
+   const status=await request(`${base}/v1/jobs/status`,token,'worker-dispatch-01',crypto.randomUUID(),{jobIds:[selected.globalJobId]});expect((await status.json() as any).result[0]).toMatchObject({globalJobId:selected.globalJobId,localTaskId:null,kind:'worker-integration-smoke',workClass:'analysis',status:'Claimed'});
+   const self=await request(`${base}/v1/workers/self`,token,'worker-dispatch-01',crypto.randomUUID(),{});expect((await self.json() as any).result.worker).toMatchObject({workerId:'worker-dispatch-01',allowCodeChanges:false});
+   expect(controllerDashboardSnapshot(file).jobs.find(job=>job.globalJobId===first.globalJobId)?.status).toBe('Ready');
+  }finally{await app.close();}
+ });
+
  it('synchronizes the current policy to authenticated Workers and emergency stop blocks new claims',async()=>{
   const file=setup(),token='control-policy-worker-token-with-over-32-characters-01';
   const app=createDistributedControllerServer({host:'127.0.0.1',port:0,dbPath:file,workerTokens:{'worker-policy-sync':token},workerPolicies:{'worker-policy-sync':{os:'windows',allowCodeChanges:false}}});await app.listen();
