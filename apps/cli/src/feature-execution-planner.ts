@@ -34,7 +34,7 @@ export function buildFeatureExecutionPlan(displayJobId: string, lease: { workerI
   if (spec.policyVersion !== policy.version) reasons.push('Specification Controller Policy Version is stale.');
   if (policy.emergencyStop || policy.mode === 'PAUSED' || !policy.globalAutomationEnabled) reasons.push('Controller is paused or automation is globally disabled.');
   if (policy.mode !== 'FEATURE_EXPANSION' && policy.mode !== 'FULL_AUTONOMOUS') reasons.push(`Operating mode ${policy.mode} does not permit feature expansion.`);
-  if (!policy.global.autonomousFeatureDevelopment || !policy.global.codexExecution) reasons.push('Global autonomous development and Codex execution remain locked OFF.');
+  if (!policy.global.autonomousFeatureDevelopment || !policy.global.codexExecution) reasons.push('Global autonomous development and/or Codex execution is currently OFF in Controller policy.');
   if (spec.specification.project === 'calculator') reasons.push('Calculator source modification lock is active.');
   const service = spec.specification.project as keyof typeof policy.services;
   const servicePolicy = policy.services[service];
