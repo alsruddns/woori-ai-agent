@@ -30,7 +30,7 @@ A temporary, synthetic canary run used the installed Codex CLI sandbox without s
 - Dashboard build: passed.
 - Live read-only Worker status: Connected; existing integration smoke job completed with Lease/Fencing Token evidence in the Controller.
 - Live code-change Claim, development Worker registration, Quiz Clone creation, Quiz tests/build/localization/SEO/Sitemap, and real Codex execution: not performed because global policy gates are off and no code-change Worker is provisioned.
-- Ubuntu Actions for this commit: pending.
+- Ubuntu Actions: Run `40258855185` succeeded. The workflow reported rootless bubblewrap and Linux host sandbox prerequisites as unverified, so Linux code modification remains disabled.
 
 No Quiz source, PR, push, merge, deployment, or VPS change was made. Tools, Calculator, Linux code-modification, and MoneyBook protections remain in place.
 
