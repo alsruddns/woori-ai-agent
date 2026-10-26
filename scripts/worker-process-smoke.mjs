@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -15,6 +15,7 @@ const port = 42_000 + Math.floor(Math.random() * 15_000);
 const environment = {
   ...process.env,
   WOORI_CONTROLLER_DB_PATH: databasePath,
+  WOORI_AGENT_DB_PATH: path.join(testRoot, 'agent.sqlite'),
   WOORI_CONTROLLER_HOST: '127.0.0.1',
   WOORI_CONTROLLER_PORT: String(port),
   WOORI_CONTROLLER_URL: `http://127.0.0.1:${port}`,
@@ -170,6 +171,25 @@ try {
   const { recoverExpiredControllerJob } = await import(pathToFileURL(path.join(repositoryRoot, 'apps/cli/src/distributed-queue.ts')).href);
   recoverExpiredControllerJob({ jobId: expiredLease.jobId, processTerminated: true, verifiedBy: 'worker-process-smoke', evidence: 'Isolated Worker heartbeat process stopped after the Controller rejected an expired lease.' }, databasePath);
 
+  const dispatchJob = submitControllerJob({
+    service: 'quiz', kind: 'worker-integration-smoke', workClass: 'analysis', requiredOs: 'windows',
+    idempotencyKey: `worker-smoke-dispatch:${randomUUID()}`, title: 'Temporary read-only Worker dispatch and audit verification',
+  }, databasePath);
+  approveControllerJob(dispatchJob.globalJobId, databasePath);
+  const dispatched = await runWorker(['dispatch-once', `--job-id=${dispatchJob.globalJobId}`, '--execute=true']);
+  const auditPath = path.join(testRoot, 'agent.sqlite');
+  const auditDb = new Database(auditPath, { readonly: true, fileMustExist: true });
+  const auditJob = auditDb.prepare('SELECT job_uuid AS jobUuid FROM development_audit_jobs WHERE display_id=? OR job_uuid=?').get(dispatched.auditJobId, dispatched.auditJobId);
+  const dispatchEvents = auditJob ? auditDb.prepare('SELECT event_type AS type,actor_type AS actor,fencing_token AS fencingToken FROM development_audit_events WHERE job_uuid=? ORDER BY sequence_no').all(auditJob.jobUuid) : [];
+  auditDb.close();
+  const auditVerifier = path.join(testRoot, 'verify-audit.mts');
+  fs.writeFileSync(auditVerifier, `import { verifyDevelopmentAuditChain } from ${JSON.stringify(pathToFileURL(path.join(repositoryRoot, 'apps/cli/src/development-audit.ts')).href)}; console.log(JSON.stringify(verifyDevelopmentAuditChain(${JSON.stringify(dispatched.auditJobId)}, ${JSON.stringify(auditPath)})));`);
+  const auditVerification = spawnSync(process.execPath, [path.join(repositoryRoot, 'node_modules/tsx/dist/cli.mjs'), auditVerifier], { cwd: repositoryRoot, encoding: 'utf8', windowsHide: true, timeout: 10_000 });
+  if (auditVerification.error || auditVerification.status !== 0) throw new Error('Could not verify the isolated Worker audit chain.');
+  const dispatchAuditChain = JSON.parse(auditVerification.stdout.trim());
+  const terminalDispatchEvent = dispatchEvents.some(event => event.type === 'WORKER_DISPATCH_COMPLETED' && event.actor === 'Worker' && Number.isSafeInteger(event.fencingToken));
+  if (dispatched.result?.status !== 'Completed' || !dispatchAuditChain.valid || !terminalDispatchEvent) throw new Error('Read-only dispatch did not complete with an intact fenced Worker audit event.');
+
   const snapshot = controllerDashboardSnapshot(databasePath);
   const sameWorker = snapshot.workers.filter((worker) => worker.workerId === workerId);
   const currentAcknowledgement = snapshot.workerPolicyAcknowledgements.some((item) => item.workerId === workerId && item.policyVersion === snapshot.policyVersion);
@@ -260,6 +280,9 @@ try {
     transitions,
     finalJobStatus: snapshot.jobs.find((job) => job.globalJobId === lease.jobId)?.status,
     expiredLeaseRejectedByWorkerProcess: expiredLeaseRejected,
+    readOnlyDispatchCompleted: dispatched.result.status === 'Completed',
+    terminalWorkerAuditRecorded: terminalDispatchEvent,
+    dispatchAuditChainValid: dispatchAuditChain.valid,
     codeChangeBlockedUnderDefaultPolicy: codeChangeBlocked,
     emergencyStopBlocksActiveTransition,
     activeWorkerStoppedOnNewPolicyVersion: emergencyPolicyVersion > emergencyLease.policyVersion,
