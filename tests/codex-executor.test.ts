@@ -3,21 +3,30 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
+import { getAgentPolicy } from '../apps/cli/src/agent-policy.js';
+import { listCodexInvocations } from '../apps/cli/src/codex-invocations.js';
 import { enqueueDevelopmentTask, listDevelopmentTasks, transitionDevelopmentTask } from '../apps/cli/src/development-orchestrator.js';
-import { cleanupDevelopmentWorktree, codexExecutorInternals, executeApprovedTask, listDevelopmentExecutions, parseGitStatusPorcelainZ } from '../apps/cli/src/codex-executor.js';
+import { boundedCodexExecutionLimits, cleanupDevelopmentWorktree, codexExecutorInternals, executeApprovedTask, listDevelopmentExecutions, parseGitStatusPorcelainZ } from '../apps/cli/src/codex-executor.js';
 import { codexExecArgs, paidCredentialVariablesPresent, parseAllowedPaths, pathMatchesAllowlist, probeCodexSandbox, redactCodexOutput, safeCodexEnv } from '../apps/cli/src/codex-cli.js';
 import type { LinuxRuntimeReadiness } from '../apps/cli/src/linux-runtime.js';
 
 const previousDb=process.env.WOORI_AGENT_DB_PATH;
+const previousControllerDb=process.env.WOORI_CONTROLLER_DB_PATH;
 let tempDir:string|undefined;
-afterEach(()=>{if(previousDb===undefined)delete process.env.WOORI_AGENT_DB_PATH;else process.env.WOORI_AGENT_DB_PATH=previousDb;if(tempDir)fs.rmSync(tempDir,{recursive:true,force:true});tempDir=undefined;});
-function setup(){tempDir=fs.mkdtempSync(path.join(os.tmpdir(),'woori-codex-runner-'));process.env.WOORI_AGENT_DB_PATH=path.join(tempDir,'queue.sqlite');return tempDir;}
+afterEach(()=>{if(previousDb===undefined)delete process.env.WOORI_AGENT_DB_PATH;else process.env.WOORI_AGENT_DB_PATH=previousDb;if(previousControllerDb===undefined)delete process.env.WOORI_CONTROLLER_DB_PATH;else process.env.WOORI_CONTROLLER_DB_PATH=previousControllerDb;if(tempDir)fs.rmSync(tempDir,{recursive:true,force:true});tempDir=undefined;});
+function setup(){tempDir=fs.mkdtempSync(path.join(os.tmpdir(),'woori-codex-runner-'));const dbPath=path.join(tempDir,'queue.sqlite');process.env.WOORI_AGENT_DB_PATH=dbPath;process.env.WOORI_CONTROLLER_DB_PATH=dbPath;const base=getAgentPolicy(dbPath),policy=structuredClone(base);policy.mode='FULL_AUTONOMOUS';policy.globalAutomationEnabled=true;policy.global.featurePlanning=true;policy.global.featureSpecification=true;policy.global.autonomousFeatureDevelopment=true;policy.global.automaticBugFix=true;policy.global.codexExecution=true;policy.global.automaticRetry=true;policy.services.docs.enabled=true;policy.services.docs.featureDevelopment=true;policy.services.docs.bugFix=true;policy.services.docs.codex=true;const db=new Database(dbPath);db.prepare('UPDATE agent_control_policy SET policy_json=? WHERE id=1').run(JSON.stringify(policy));db.close();return tempDir;}
 function makeTask(){const task=enqueueDevelopmentTask({service:'docs',title:'Add approved focused change',kind:'qa',priority:'Low',evidence:'A synthetic fixture needs a source file.',acceptanceCriteria:'Add one file under src and report its path.',sourceAgent:'qa'});transitionDevelopmentTask(task.taskId!,'Triaged');transitionDevelopmentTask(task.taskId!,'Ready');return task.taskId!;}
 function fixtureRepo(root:string){const repo=path.join(root,'source-docs');fs.mkdirSync(path.join(repo,'src'),{recursive:true});fs.writeFileSync(path.join(repo,'package.json'),JSON.stringify({name:'fixture-docs',version:'1.0.0',scripts:{lint:'node -e "process.exit(0)"',test:'node -e "process.exit(0)"',build:'node -e "process.exit(0)"'}}));fs.writeFileSync(path.join(repo,'src','index.ts'),'export const marker = 1;\n');execFileSync('git',['init','-q',repo]);execFileSync('git',['-C',repo,'add','.']);execFileSync('git',['-C',repo,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture']);return repo;}
 const repository=(localPath:string,overrides:Record<string,unknown>={})=>({id:'docs',name:'woori-docs',repositoryUrl:'https://github.com/alsruddns/woori-docs.git',localPath,stack:['Next.js','TypeScript','pnpm'],observedBranch:'develop',observedDirtyFiles:0,commands:{lint:'pnpm lint',test:'pnpm test',build:'pnpm build'},deploymentWorkflow:'.github/workflows/deploy.yml',codeAutomationEnabled:true,autoDeployEnabled:false,writeLocked:false,exists:true,observedOrigin:'https://github.com/alsruddns/woori-docs.git',observedCurrentBranch:'main',dirtyFileCount:0,dirtyPaths:[],repositoryVerified:true,worktreeEligible:true,blockReasons:[],...overrides}) as never;
 function fakeCli(root:string){const file=path.join(root,'fake-codex.cjs');fs.writeFileSync(file,`const a=process.argv.slice(2);if(a[0]==='--version')console.log('codex-cli 0.163.0');else if(a[0]==='login'&&a[1]==='status')console.log('Logged in using ChatGPT');`);return{kind:'node' as const,executable:process.execPath,prefixArgs:[file],version:'codex-cli 0.163.0'};}
 
 describe('Codex local execution safety',()=>{
+ it('applies service timeout/retry ceilings independently from Codex daily invocation budget',()=>{
+  expect(boundedCodexExecutionLimits({maximumCodexExecutionTimeSeconds:60,maximumRetryCount:0},3_600_000,3,true)).toEqual({timeoutMs:60_000,maxRetries:0});
+  expect(boundedCodexExecutionLimits({maximumCodexExecutionTimeSeconds:900,maximumRetryCount:1},240_000,3,false)).toEqual({timeoutMs:240_000,maxRetries:0});
+  expect(boundedCodexExecutionLimits({maximumCodexExecutionTimeSeconds:900,maximumRetryCount:1},2_000_000,3,true)).toEqual({timeoutMs:900_000,maxRetries:1});
+ });
  it('preserves leading whitespace in NUL-delimited Git status paths and rename records',()=>{
   expect(parseGitStatusPorcelainZ(' M locales/en.json\0?? public/en/page.html\0R  new/name.ts\0old/name.ts\0')).toEqual(['locales/en.json','public/en/page.html','new/name.ts','old/name.ts']);
  });
@@ -81,10 +90,17 @@ describe('Codex local execution safety',()=>{
  it('uses a temporary Git worktree and records successful verification without touching the source worktree',async()=>{
   const root=setup();const source=fixtureRepo(root);const taskId=makeTask();const before=execFileSync('git',['-C',source,'status','--porcelain'],{encoding:'utf8'});
   const cli=fakeCli(root);const result=await executeApprovedTask({taskId,approved:true,platform:'win32',allowedPaths:'src/**,tests/**',launcher:cli,repositoryOverride:repository(source),agentDataRoot:path.join(root,'orchestrator'),sandboxProbe:()=>({status:'Ready',message:'fixture sandbox ready',exitCode:0}),runCodex:async(_cli,_args,cwd)=>{fs.writeFileSync(path.join(cwd,'src','generated.ts'),'export const generated = true;\n');return{exitCode:0,timedOut:false,stdout:'done',stderr:''};},runValidation:(_cli,cwd,patterns)=>({passed:patterns.includes('src/**')&&fs.existsSync(path.join(cwd,'src','generated.ts')),changedFiles:['src/generated.ts'],verification:{passed:true,failures:[],scripts:[{script:'lint',exitCode:0,timedOut:false,output:''},{script:'test',exitCode:0,timedOut:false,output:''},{script:'build',exitCode:0,timedOut:false,output:''}]}})});
-  expect(result.status).toBe('Completed');expect((result as Record<string,unknown>).changedFiles).toEqual(['src/generated.ts']);expect((result as Record<string,unknown>).branchName).toContain('codex-agent/docs/');
+  expect(result.status,JSON.stringify(result)).toBe('Completed');expect((result as Record<string,unknown>).changedFiles).toEqual(['src/generated.ts']);expect((result as Record<string,unknown>).branchName).toContain('codex-agent/docs/');
   expect(execFileSync('git',['-C',source,'status','--porcelain'],{encoding:'utf8'})).toBe(before);
   expect((listDevelopmentTasks().tasks[0] as {status:string}).status).toBe('Testing');
   expect((listDevelopmentExecutions()[0] as Record<string,unknown>)?.authMode).toBe('ChatGPT');
+ });
+
+ it('persists a real spawned CLI process invocation as Unknown subscription usage without any model request',async()=>{
+  const root=setup();const source=fixtureRepo(root),taskId=makeTask(),cli=fakeCli(root);
+  const result=await executeApprovedTask({taskId,approved:true,platform:'win32',allowedPaths:'src/**',launcher:cli,repositoryOverride:repository(source),agentDataRoot:path.join(root,'orchestrator'),sandboxProbe:()=>({status:'Ready',message:'fixture sandbox ready',exitCode:0}),runValidation:()=>({passed:false,changedFiles:[],verification:{passed:false,failures:['fixture contains no generated change']}})});
+  const invocations=listCodexInvocations(path.join(root,'queue.sqlite'));
+  expect(result.status).toBe('Failed');expect(invocations).toHaveLength(1);expect(invocations[0]).toMatchObject({executionStatus:'Completed',subscriptionUsageStatus:'Unknown',attemptNumber:1});
  });
 
  it('marks out-of-scope edits and test failures as Failed and never retries',async()=>{

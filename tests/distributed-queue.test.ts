@@ -5,7 +5,7 @@ import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 import { approveControllerJob, assertCurrentControllerLease, claimControllerJob, controllerDashboardSnapshot, heartbeatControllerWorker, recoverExpiredControllerJob, registerControllerWorker, renewControllerLease, submitControllerJob, transitionControllerJob } from '../apps/cli/src/distributed-queue.js';
 import { controllerNetworkPolicy, controllerWorkerRequest, createDistributedControllerServer, ensureDevelopmentGlobalJobMap } from '../apps/cli/src/distributed-controller-http.js';
-import { getAgentPolicy,listPolicyAudit,updateAgentPolicy } from '../apps/cli/src/agent-policy.js';
+import { getAgentPolicy,listPolicyAudit,recordWorkerPolicyAcknowledgement,updateAgentPolicy } from '../apps/cli/src/agent-policy.js';
 
 let root = '';
 const dbPath = () => path.join(root, 'controller.sqlite');
@@ -18,7 +18,10 @@ function worker(workerId: string, osName: 'windows' | 'linux' = 'windows') {
 function register(workerId: string, osName: 'windows' | 'linux' = 'windows', file = dbPath()) {
  return registerControllerWorker(worker(workerId, osName), file, {os:osName,allowCodeChanges:osName==='windows'});
 }
-function claimCodeJob(workerId:string,leaseMs:number,file:string,availableProjects=['tools','docs','quiz','home']){const db=new Database(file);db.exec("CREATE TABLE IF NOT EXISTS project_lock_meta(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);INSERT OR IGNORE INTO project_lock_meta(id,version) VALUES(1,1);CREATE TABLE IF NOT EXISTS project_development_locks(project_id TEXT PRIMARY KEY,state TEXT NOT NULL);INSERT OR IGNORE INTO project_development_locks VALUES('tools','AVAILABLE'),('docs','AVAILABLE'),('quiz','AVAILABLE'),('home','AVAILABLE')");db.close();return claimControllerJob(workerId,leaseMs,file,undefined,{lockVersion:1,availableProjects,policyVersion:1});}
+function seedCodePolicy(file:string, service='quiz', limits:Record<string,number>={}){const base=getAgentPolicy(file);const policy=structuredClone(base);policy.mode='FULL_AUTONOMOUS';policy.global.featurePlanning=true;policy.global.featureSpecification=true;policy.global.autonomousFeatureDevelopment=true;policy.global.automaticBugFix=true;policy.global.codexExecution=true;for(const id of ['home','tools','docs','quiz'] as const){policy.services[id].featureDiscovery=true;policy.services[id].featureDevelopment=true;policy.services[id].bugFix=true;policy.services[id].codex=true;}Object.assign(policy.services[service as keyof typeof policy.services],limits);const db=new Database(file);db.prepare('UPDATE agent_control_policy SET policy_json=? WHERE id=1').run(JSON.stringify(policy));db.close();}
+function ackCodePolicy(workerId:string,file:string){recordWorkerPolicyAcknowledgement(workerId,getAgentPolicy(file).version,file);}
+function prepareProjectGuard(file:string){const db=new Database(file);db.exec("CREATE TABLE IF NOT EXISTS project_lock_meta(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);INSERT OR IGNORE INTO project_lock_meta(id,version) VALUES(1,1);CREATE TABLE IF NOT EXISTS project_development_locks(project_id TEXT PRIMARY KEY,state TEXT NOT NULL);INSERT OR IGNORE INTO project_development_locks VALUES('tools','AVAILABLE'),('docs','AVAILABLE'),('quiz','AVAILABLE'),('home','AVAILABLE')");db.close();}
+function claimCodeJob(workerId:string,leaseMs:number,file:string,availableProjects=['tools','docs','quiz','home']){prepareProjectGuard(file);seedCodePolicy(file);ackCodePolicy(workerId,file);return claimControllerJob(workerId,leaseMs,file,undefined,{lockVersion:1,availableProjects,policyVersion:getAgentPolicy(file).version});}
 function request(url: string, token: string, workerId: string, nonce = crypto.randomUUID(), body: unknown = worker(workerId)) {
  return fetch(url, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-woori-worker-id': workerId, 'x-woori-timestamp': String(Date.now()), 'x-woori-nonce': nonce, 'x-woori-request-id': crypto.randomUUID() }, body: JSON.stringify(body) });
 }
@@ -45,9 +48,42 @@ describe('distributed Controller lease safety', () => {
   expect(() => assertCurrentControllerLease({ jobId: lease.jobId, workerId: lease.workerId, fencingToken: lease.fencingToken }, file)).not.toThrow();
  });
 
+ it('enforces code-change global/service gates, current Worker acknowledgement, daily limit and complexity at Claim', () => {
+  const file=setup();prepareProjectGuard(file);seedCodePolicy(file,'quiz',{maximumDailyDevelopmentJobs:0});register('worker-limit-01','windows',file);ackCodePolicy('worker-limit-01',file);
+  const blocked=submitControllerJob({service:'quiz',kind:'feature',complexity:1,workClass:'code_change',requiredOs:'windows',idempotencyKey:'limit-zero',title:'Quiz feature'},file);approveControllerJob(blocked.globalJobId,file);
+  expect(claimCodeJob('worker-limit-01',60_000,file)).toBeNull();
+  seedCodePolicy(file,'quiz',{maximumDailyDevelopmentJobs:1,maximumConcurrentJobs:0});
+  expect(claimControllerJob('worker-limit-01',60_000,file,undefined,{lockVersion:1,availableProjects:['quiz'],policyVersion:1})).toBeNull();
+  seedCodePolicy(file,'quiz',{maximumConcurrentJobs:1});
+  expect(claimControllerJob('worker-limit-01',60_000,file,undefined,{lockVersion:1,availableProjects:['quiz'],policyVersion:1})).toMatchObject({jobId:blocked.globalJobId});
+ });
+
+ it('counts a development job once at first Running transition in UTC and does not count a retry as another job', () => {
+  const file=setup();prepareProjectGuard(file);seedCodePolicy(file,'quiz',{maximumDailyDevelopmentJobs:1,maximumRetryCount:0});register('worker-daily-01','windows',file);ackCodePolicy('worker-daily-01',file);
+  const first=submitControllerJob({service:'quiz',kind:'feature',complexity:1,workClass:'code_change',requiredOs:'windows',idempotencyKey:'daily-first',title:'First Quiz feature'},file);approveControllerJob(first.globalJobId,file);
+  const lease=claimCodeJob('worker-daily-01',60_000,file);expect(lease).toBeTruthy();
+  expect(transitionControllerJob({...lease!,status:'Running',policyVersion:1},file)).toMatchObject({status:'Running'});
+  const db=new Database(file);const started=db.prepare('SELECT started_at FROM controller_jobs WHERE global_job_id=?').get(first.globalJobId) as {started_at:string};expect(started.started_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);db.close();
+  expect(transitionControllerJob({...lease!,status:'Completed',policyVersion:1,result:{testsPassed:true}},file)).toMatchObject({status:'Completed'});
+  const second=submitControllerJob({service:'quiz',kind:'feature',complexity:1,workClass:'code_change',requiredOs:'windows',idempotencyKey:'daily-second',title:'Second Quiz feature'},file);approveControllerJob(second.globalJobId,file);
+  expect(claimCodeJob('worker-daily-01',60_000,file)).toBeNull();
+  expect(controllerDashboardSnapshot(file).policyBlocks).toEqual(expect.arrayContaining([expect.objectContaining({globalJobId:second.globalJobId,reason:'DAILY_DEVELOPMENT_LIMIT_REACHED:1/1:UTC'})]));
+ });
+
+ it('blocks Unknown or over-limit feature complexity and stale policy acknowledgements', () => {
+  const file=setup();prepareProjectGuard(file);seedCodePolicy(file,'quiz',{maximumFeatureComplexity:1});register('worker-complexity-01','windows',file);ackCodePolicy('worker-complexity-01',file);
+  const unknown=submitControllerJob({service:'quiz',kind:'feature',workClass:'code_change',requiredOs:'windows',idempotencyKey:'complexity-unknown',title:'Unknown complexity'},file);approveControllerJob(unknown.globalJobId,file);
+  expect(claimCodeJob('worker-complexity-01',60_000,file)).toBeNull();
+  const valid=submitControllerJob({service:'quiz',kind:'feature',complexity:2,workClass:'code_change',requiredOs:'windows',idempotencyKey:'complexity-high',title:'Over limit complexity'},file);approveControllerJob(valid.globalJobId,file);
+  expect(claimCodeJob('worker-complexity-01',60_000,file)).toBeNull();
+  const policy=getAgentPolicy(file);updateAgentPolicy({expectedVersion:policy.version,actor:'fixture-operator',reason:'advance only the isolated fixture policy',patch:{mode:'PAUSED'}},file);
+  expect(claimCodeJob('worker-complexity-01',60_000,file)).toBeNull();
+ });
+
  it('requires the current project lock version and skips projects absent from the unlocked set', () => {
   const file=setup();register('worker-win-lock','windows',file);
-  const submitted=submitControllerJob({service:'quiz',kind:'feature',workClass:'code_change',requiredOs:'windows',idempotencyKey:'quiz-lock-guard',title:'Quiz feature'},file);
+  seedCodePolicy(file);ackCodePolicy('worker-win-lock',file);
+  const submitted=submitControllerJob({service:'quiz',kind:'feature',complexity:1,workClass:'code_change',requiredOs:'windows',idempotencyKey:'quiz-lock-guard',title:'Quiz feature'},file);
   approveControllerJob(submitted.globalJobId,file);
   const db=new Database(file);db.exec("CREATE TABLE project_lock_meta(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);INSERT INTO project_lock_meta VALUES(1,2);CREATE TABLE project_development_locks(project_id TEXT PRIMARY KEY,state TEXT NOT NULL);INSERT INTO project_development_locks VALUES('quiz','AVAILABLE')");db.close();
   expect(claimControllerJob('worker-win-lock',60_000,file,undefined,{lockVersion:1,availableProjects:['quiz'],policyVersion:1})).toBeNull();
@@ -57,7 +93,7 @@ describe('distributed Controller lease safety', () => {
 
  it('invalidates active code-change leases after any project lock version change', () => {
   const file=setup();register('worker-win-lock-stale','windows',file);
-  const submitted=submitControllerJob({service:'quiz',kind:'feature',workClass:'code_change',requiredOs:'windows',idempotencyKey:'quiz-lock-version-active',title:'Quiz feature'},file);
+  const submitted=submitControllerJob({service:'quiz',kind:'feature',complexity:1,workClass:'code_change',requiredOs:'windows',idempotencyKey:'quiz-lock-version-active',title:'Quiz feature'},file);
   approveControllerJob(submitted.globalJobId,file);const lease=claimCodeJob('worker-win-lock-stale',60_000,file)!;
   const db=new Database(file);db.prepare('UPDATE project_lock_meta SET version=version+1 WHERE id=1').run();db.close();
   expect(()=>renewControllerLease(lease,60_000,file)).toThrow(/PROJECT_LOCK_VERSION_STALE/);
@@ -68,7 +104,7 @@ describe('distributed Controller lease safety', () => {
  it('honors overlapping repository/path resource locks across service jobs', () => {
   const file=setup();register('worker-win-31','windows',file);register('worker-win-32','windows',file);
   const first=submitControllerJob({service:'docs',kind:'bug',workClass:'code_change',requiredOs:'windows',idempotencyKey:'lock-a',title:'Docs work',resourceKeys:['repo:shared','path:src/common.ts']},file);
-  const second=submitControllerJob({service:'quiz',kind:'feature',workClass:'code_change',requiredOs:'windows',idempotencyKey:'lock-b',title:'Quiz work',resourceKeys:['repo:shared','path:src/common.ts']},file);
+  const second=submitControllerJob({service:'quiz',kind:'feature',complexity:1,workClass:'code_change',requiredOs:'windows',idempotencyKey:'lock-b',title:'Quiz work',resourceKeys:['repo:shared','path:src/common.ts']},file);
   approveControllerJob(first.globalJobId,file);approveControllerJob(second.globalJobId,file);
   expect(claimCodeJob('worker-win-31',60_000,file)?.jobId).toBe(first.globalJobId);
   expect(claimCodeJob('worker-win-32',60_000,file)).toBeNull();

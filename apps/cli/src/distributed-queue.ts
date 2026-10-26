@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import type { AgentPolicy } from './agent-policy.js';
 
 export type WorkerOs = 'windows' | 'linux';
 export type ControllerWorkerPolicy = { os: WorkerOs; allowCodeChanges: boolean };
@@ -16,7 +17,7 @@ export type ControllerWorkerInput = {
 export type ControllerJobInput = {
   localTaskId?: string; service: string; kind: string; workClass: WorkClass;
   idempotencyKey: string; title: string; evidence?: string; requiredOs?: WorkerOs | 'any';
-  resourceKeys?: string[];
+  resourceKeys?: string[]; complexity?: number | null;
 };
 export type Lease = { jobId: string; workerId: string; leaseId: string; fencingToken: number; expiresAt: string; status: string;policyVersion:number|null };
 
@@ -51,6 +52,7 @@ function openControllerDb(dbPath = defaultDbPath()) {
       worker_id TEXT, lease_id TEXT, fencing_token INTEGER, acquired_at TEXT, expires_at TEXT,
       last_renewed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, result_json TEXT,
       failure_code TEXT, project_lock_version INTEGER, policy_version INTEGER
+      , complexity_score INTEGER, started_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_controller_jobs_claim ON controller_jobs(status,created_at);
     CREATE INDEX IF NOT EXISTS idx_controller_jobs_worker ON controller_jobs(worker_id,status);
@@ -62,13 +64,54 @@ function openControllerDb(dbPath = defaultDbPath()) {
       worker_id TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL,
       PRIMARY KEY(worker_id,nonce)
     );
+    CREATE TABLE IF NOT EXISTS controller_job_policy_blocks(
+      global_job_id TEXT NOT NULL, policy_version INTEGER NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL,
+      PRIMARY KEY(global_job_id,policy_version,reason)
+    );
   `);
   const workerColumns = db.prepare('PRAGMA table_info(controller_workers)').all() as Array<{ name: string }>;
   if (!workerColumns.some(column => column.name === 'allow_code_changes')) db.exec('ALTER TABLE controller_workers ADD COLUMN allow_code_changes INTEGER NOT NULL DEFAULT 0');
   const jobColumns = db.prepare('PRAGMA table_info(controller_jobs)').all() as Array<{ name: string }>;
   if (!jobColumns.some(column => column.name === 'project_lock_version')) db.exec('ALTER TABLE controller_jobs ADD COLUMN project_lock_version INTEGER');
   if (!jobColumns.some(column => column.name === 'policy_version')) db.exec('ALTER TABLE controller_jobs ADD COLUMN policy_version INTEGER');
+  if (!jobColumns.some(column => column.name === 'complexity_score')) db.exec('ALTER TABLE controller_jobs ADD COLUMN complexity_score INTEGER');
+  if (!jobColumns.some(column => column.name === 'started_at')) db.exec('ALTER TABLE controller_jobs ADD COLUMN started_at TEXT');
   return db;
+}
+
+function readCurrentPolicy(db: Database.Database): AgentPolicy | null {
+  const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_control_policy'").get();
+  if (!table) return null;
+  const row = db.prepare('SELECT version,policy_json FROM agent_control_policy WHERE id=1').get() as { version: number; policy_json: string } | undefined;
+  if (!row) return null;
+  try { const policy = JSON.parse(row.policy_json) as AgentPolicy; return policy.version === row.version ? policy : null; }
+  catch { return null; }
+}
+
+function assertCurrentWorkerPolicyAck(db: Database.Database, workerId: string, policy: AgentPolicy) {
+  const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='worker_policy_acknowledgements'").get();
+  if (!exists) throw new Error('WORKER_POLICY_ACK_MISSING');
+  const ack = db.prepare('SELECT policy_version FROM worker_policy_acknowledgements WHERE worker_id=?').get(workerId) as { policy_version: number } | undefined;
+  if (!ack || ack.policy_version !== policy.version) throw new Error('WORKER_POLICY_ACK_STALE');
+}
+
+function assertCodeChangePolicy(db: Database.Database, job: { service: string; kind: string; work_class?: string; complexity_score?: number | null }, workerId: string, expectedVersion?: number | null) {
+  const policy = readCurrentPolicy(db);
+  if (!policy) throw new Error('CONTROLLER_POLICY_UNVERIFIED');
+  if (expectedVersion == null || policy.version !== expectedVersion) throw new Error(`POLICY_VERSION_STALE:${policy.version}`);
+  assertCurrentWorkerPolicyAck(db, workerId, policy);
+  if (policy.emergencyStop || policy.mode === 'PAUSED' || !policy.globalAutomationEnabled) throw new Error('POLICY_BLOCKED:Controller stopped or automation disabled.');
+  const service = policy.services[job.service as keyof AgentPolicy['services']];
+  if (!service?.enabled || !service.codex) throw new Error(`SERVICE_CODE_CHANGE_POLICY_BLOCKED:${job.service}`);
+  const feature = /feature|new[_ -]?feature/i.test(job.kind);
+  if (feature) {
+    if (!['FEATURE_EXPANSION', 'FULL_AUTONOMOUS'].includes(policy.mode) || !policy.global.featurePlanning || !policy.global.featureSpecification || !policy.global.autonomousFeatureDevelopment || !policy.global.codexExecution || !service.featureDiscovery || !service.featureDevelopment) throw new Error('FEATURE_DEVELOPMENT_POLICY_BLOCKED');
+    if (!Number.isInteger(job.complexity_score) || Number(job.complexity_score) < 0 || Number(job.complexity_score) > service.maximumFeatureComplexity) throw new Error('FEATURE_COMPLEXITY_UNKNOWN_OR_OVER_LIMIT');
+  } else {
+    if (!['BUG_FIX', 'FULL_AUTONOMOUS'].includes(policy.mode) || !policy.global.automaticBugFix || !policy.global.codexExecution || !service.bugFix) throw new Error('BUG_FIX_POLICY_BLOCKED');
+  }
+  if (!policy.global.autonomousFeatureDevelopment && feature) throw new Error('FEATURE_DEVELOPMENT_POLICY_BLOCKED');
+  return { policy, service };
 }
 
 function assertProjectLockVersion(db: Database.Database, job: { work_class?: string; service?: string; project_lock_version?: number | null }) {
@@ -98,6 +141,7 @@ function event(db: Database.Database, jobId: string | null, workerId: string | n
   db.prepare('INSERT INTO controller_events(global_job_id,worker_id,event,fencing_token,detail,created_at) VALUES(?,?,?,?,?,?)')
     .run(jobId, workerId, name, fencingToken, detail === undefined ? null : JSON.stringify(detail), nowIso());
 }
+function recordPolicyBlockOnce(db:Database.Database,jobId:string,workerId:string,policyVersion:number,reason:string){const inserted=db.prepare('INSERT OR IGNORE INTO controller_job_policy_blocks(global_job_id,policy_version,reason,created_at) VALUES(?,?,?,?)').run(jobId,policyVersion,reason,nowIso());if(inserted.changes)event(db,jobId,workerId,'policy-blocked',null,{policyVersion,reason});}
 
 function validateWorkerPolicy(input: ControllerWorkerInput, policy: ControllerWorkerPolicy) {
   if (!policy || !['windows', 'linux'].includes(policy.os) || typeof policy.allowCodeChanges !== 'boolean') throw new Error('Controller-side Worker policy is required.');
@@ -146,11 +190,12 @@ export function submitControllerJob(input: ControllerJobInput, dbPath?: string) 
   if (input.workClass === 'code_change' && input.requiredOs === 'linux') throw new Error('Linux code modification is disabled until sandbox verification is complete.');
   if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 200 || !input.title.trim() || input.title.length > 300) throw new Error('A bounded idempotency key and title are required.');
   if (!['any', 'windows', 'linux'].includes(input.requiredOs ?? 'any')) throw new Error('Unsupported required Worker OS.');
+  if (input.complexity != null && (!Number.isInteger(input.complexity) || input.complexity < 0 || input.complexity > 5)) throw new Error('Feature complexity must be an integer between 0 and 5.');
   if ((input.resourceKeys ?? []).some(key => key.length > 200 || !/^[A-Za-z0-9:._/*-]+$/.test(key))) throw new Error('Resource lock keys must be bounded identifiers.');
   const db = openControllerDb(dbPath); const stamp = nowIso();
   const globalJobId = `job-${randomUUID()}`;
-  db.prepare(`INSERT OR IGNORE INTO controller_jobs(global_job_id,idempotency_key,local_task_id,service,kind,work_class,required_os,resource_keys,title,evidence,status,created_at,updated_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?, 'Discovered',?,?)`).run(globalJobId, input.idempotencyKey, input.localTaskId?.slice(0, 120) ?? null, input.service, input.kind.slice(0, 80), input.workClass, input.requiredOs ?? 'any', JSON.stringify([...new Set(input.resourceKeys ?? [])].slice(0, 32)), redactText(input.title.trim()), input.evidence ? redactText(input.evidence).slice(0, 4000) : null, stamp, stamp);
+  db.prepare(`INSERT OR IGNORE INTO controller_jobs(global_job_id,idempotency_key,local_task_id,service,kind,work_class,required_os,resource_keys,title,evidence,status,created_at,updated_at,complexity_score)
+    VALUES(?,?,?,?,?,?,?,?,?,?, 'Discovered',?,?,?)`).run(globalJobId, input.idempotencyKey, input.localTaskId?.slice(0, 120) ?? null, input.service, input.kind.slice(0, 80), input.workClass, input.requiredOs ?? 'any', JSON.stringify([...new Set(input.resourceKeys ?? [])].slice(0, 32)), redactText(input.title.trim()), input.evidence ? redactText(input.evidence).slice(0, 4000) : null, stamp, stamp, input.complexity ?? null);
   const job = db.prepare('SELECT global_job_id AS globalJobId,status FROM controller_jobs WHERE idempotency_key=?').get(input.idempotencyKey) as { globalJobId: string; status: string };
   if (job.globalJobId === globalJobId) event(db, job.globalJobId, null, 'submitted', null, { service: input.service, workClass: input.workClass });
   db.close(); return { ...job, created: job.globalJobId === globalJobId };
@@ -173,7 +218,18 @@ export function claimControllerJob(workerId: string, leaseMs = 60_000, dbPath?: 
     if (!worker || worker.state === 'Disabled' || worker.available_memory_bytes < MIN_WORKER_MEMORY_BYTES || Date.parse(worker.heartbeat_at) < stamp - 45_000 || worker.current_job_id || activeWorkerJob || provisionedPolicy && (provisionedPolicy.os !== worker.os || provisionedPolicy.allowCodeChanges !== Boolean(worker.allow_code_changes))) return null;
     const jobs = db.prepare("SELECT * FROM controller_jobs WHERE status='Ready' AND (required_os='any' OR required_os=?) ORDER BY created_at,global_job_id LIMIT 20").all(worker.os) as any[];
     for (const job of jobs) {
+      let claimServicePolicy: AgentPolicy['services'][keyof AgentPolicy['services']] | undefined;
       if(job.work_class==='code_change'){
+        let enforcement: ReturnType<typeof assertCodeChangePolicy>;
+        try { enforcement = assertCodeChangePolicy(db, job, workerId, projectGuard?.policyVersion); }
+        catch(error) { const currentPolicy=readCurrentPolicy(db);recordPolicyBlockOnce(db,job.global_job_id,workerId,currentPolicy?.version??0,error instanceof Error?error.message:'CODE_CHANGE_POLICY_BLOCKED');continue; }
+        claimServicePolicy = enforcement.service;
+        if (enforcement.service.maximumConcurrentJobs < 1) {recordPolicyBlockOnce(db,job.global_job_id,workerId,enforcement.policy.version,'MAXIMUM_CONCURRENT_JOBS_ZERO');continue;}
+        const dailyLimit = enforcement.service.maximumDailyDevelopmentJobs;
+        if (dailyLimit < 1) {recordPolicyBlockOnce(db,job.global_job_id,workerId,enforcement.policy.version,'MAXIMUM_DAILY_DEVELOPMENT_JOBS_ZERO');continue;}
+        const utcDay = new Date(stamp).toISOString().slice(0, 10);
+        const dailyStarts = db.prepare("SELECT COUNT(DISTINCT global_job_id) AS count FROM controller_jobs WHERE service=? AND work_class='code_change' AND started_at IS NOT NULL AND substr(started_at,1,10)=?").get(job.service, utcDay) as { count: number };
+        if (dailyStarts.count >= dailyLimit) {recordPolicyBlockOnce(db,job.global_job_id,workerId,enforcement.policy.version,`DAILY_DEVELOPMENT_LIMIT_REACHED:${dailyStarts.count}/${dailyLimit}:UTC`);continue;}
         if(!projectGuard||!Array.isArray(projectGuard.availableProjects)||!projectGuard.availableProjects.includes(job.service))continue;
         if(!Number.isSafeInteger(projectGuard.policyVersion))continue;
         const lockTable=db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_lock_meta'").get();if(!lockTable)continue;
@@ -181,8 +237,8 @@ export function claimControllerJob(workerId: string, leaseMs = 60_000, dbPath?: 
       }
       if (job.work_class === 'code_change' && (worker.os !== 'windows' || worker.available_memory_bytes < MIN_CODE_CHANGE_MEMORY_BYTES || worker.allow_code_changes !== 1 || provisionedPolicy && !provisionedPolicy.allowCodeChanges || worker.sandbox_status !== 'Ready' || worker.chatgpt_login_status !== 'ChatGPT' || worker.codex_cli_status !== 'Ready')) continue;
       if (job.work_class === 'code_change') {
-        const active = db.prepare("SELECT 1 FROM controller_jobs WHERE service=? AND work_class='code_change' AND status IN ('Claimed','Running','Testing') LIMIT 1").get(job.service);
-        if (active) continue;
+        const active = db.prepare("SELECT COUNT(*) AS count FROM controller_jobs WHERE service=? AND work_class='code_change' AND status IN ('Claimed','Running','Testing')").get(job.service) as {count:number};
+        if (active.count >= (claimServicePolicy?.maximumConcurrentJobs ?? 0)) {recordPolicyBlockOnce(db,job.global_job_id,workerId,projectGuard?.policyVersion??0,`MAXIMUM_CONCURRENT_JOBS_REACHED:${active.count}/${claimServicePolicy?.maximumConcurrentJobs??0}`);continue;}
         const resources = JSON.parse(job.resource_keys) as string[];
         const otherActive = db.prepare("SELECT resource_keys FROM controller_jobs WHERE work_class='code_change' AND status IN ('Claimed','Running','Testing')").all() as Array<{ resource_keys: string }>;
         if (resources.some(key => otherActive.some(row => (JSON.parse(row.resource_keys) as string[]).includes(key)))) continue;
@@ -217,10 +273,11 @@ export function workerMatchesControllerPolicy(workerId: string, policy: Controll
 
 export function renewControllerLease(input: { jobId: string; workerId: string; leaseId: string; fencingToken: number;policyVersion?:number|null }, leaseMs = 60_000, dbPath?: string) {
   const db = openControllerDb(dbPath); const tx = db.transaction(() => {
-    const job = db.prepare('SELECT status,expires_at,work_class,service,project_lock_version,policy_version FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND lease_id=? AND fencing_token=?').get(input.jobId, input.workerId, input.leaseId, input.fencingToken) as { status: string; expires_at: string; work_class?: string; service?: string; project_lock_version?: number | null;policy_version?:number|null } | undefined;
+    const job = db.prepare('SELECT status,expires_at,work_class,service,kind,complexity_score,project_lock_version,policy_version FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND lease_id=? AND fencing_token=?').get(input.jobId, input.workerId, input.leaseId, input.fencingToken) as { status: string; expires_at: string; work_class?: string; service: string; kind:string;complexity_score:number|null; project_lock_version?: number | null;policy_version?:number|null } | undefined;
     if (!job || !ACTIVE.includes(job.status as typeof ACTIVE[number]) && job.status !== 'Claimed') throw new Error('Lease or fencing token is stale.');
     assertProjectLockVersion(db, job);
     if(job.work_class==='code_change'&&(!Number.isSafeInteger(input.policyVersion)||job.policy_version!==input.policyVersion))throw new Error(`POLICY_VERSION_STALE:${job.policy_version??'Unknown'}`);
+    if(job.work_class==='code_change') assertCodeChangePolicy(db,job,input.workerId,input.policyVersion);
     if (Date.parse(job.expires_at) <= Date.now()) throw new Error('Expired leases cannot be renewed. Operator recovery evidence is required.');
     const stamp = nowIso(), expiresAt = new Date(Date.now() + Math.max(10_000, Math.min(leaseMs, 5 * 60_000))).toISOString();
     db.prepare('UPDATE controller_jobs SET expires_at=?,last_renewed_at=?,updated_at=? WHERE global_job_id=?').run(expiresAt, stamp, stamp, input.jobId);
@@ -238,10 +295,20 @@ export function transitionControllerJob(input: { jobId: string; workerId: string
     summaryCode: typeof rawResult.summaryCode === 'string' && /^[A-Z0-9_.-]{1,64}$/i.test(rawResult.summaryCode) ? rawResult.summaryCode : undefined,
   };
   const db = openControllerDb(dbPath); const tx = db.transaction(() => {
-    const job = db.prepare('SELECT status,expires_at,work_class,service,project_lock_version,policy_version FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND lease_id=? AND fencing_token=?').get(input.jobId, input.workerId, input.leaseId, input.fencingToken) as { status: string; expires_at: string; work_class?: string; service?: string; project_lock_version?: number | null;policy_version?:number|null } | undefined;
+    const job = db.prepare('SELECT status,expires_at,work_class,service,kind,complexity_score,started_at,project_lock_version,policy_version FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND lease_id=? AND fencing_token=?').get(input.jobId, input.workerId, input.leaseId, input.fencingToken) as { status: string; expires_at: string; work_class?: string; service: string; kind:string;complexity_score:number|null;started_at:string|null; project_lock_version?: number | null;policy_version?:number|null } | undefined;
     if (!job || Date.parse(job.expires_at) <= Date.now()) throw new Error('Stale or expired fencing token; transition rejected.');
     assertProjectLockVersion(db, job);
     if(job.work_class==='code_change'&&(!Number.isSafeInteger(input.policyVersion)||job.policy_version!==input.policyVersion))throw new Error(`POLICY_VERSION_STALE:${job.policy_version??'Unknown'}`);
+    if(job.work_class==='code_change'&&['Running','Testing'].includes(input.status)) {
+      const { policy, service } = assertCodeChangePolicy(db,job,input.workerId,input.policyVersion);
+      if (input.status === 'Running' && !job.started_at) {
+        const utcDay = new Date().toISOString().slice(0,10);
+        const started = db.prepare("SELECT COUNT(DISTINCT global_job_id) AS count FROM controller_jobs WHERE service=? AND work_class='code_change' AND started_at IS NOT NULL AND substr(started_at,1,10)=?").get(job.service,utcDay) as {count:number};
+        if (started.count >= service.maximumDailyDevelopmentJobs) throw new Error(`DAILY_DEVELOPMENT_LIMIT_REACHED:${started.count}/${service.maximumDailyDevelopmentJobs}:UTC`);
+      }
+      if(input.status==='Running') db.prepare('UPDATE controller_jobs SET started_at=COALESCE(started_at,?) WHERE global_job_id=?').run(nowIso(),input.jobId);
+      void policy;
+    }
     const allowed: Record<string, string[]> = { Claimed: ['Running', 'Testing', 'Completed', 'Failed'], Running: ['Testing', 'Completed', 'Failed'], Testing: ['Completed', 'Failed'] };
     if (!allowed[job.status]?.includes(input.status)) throw new Error(`Invalid job transition ${job.status} -> ${input.status}.`);
     db.prepare('UPDATE controller_jobs SET status=?,result_json=?,failure_code=?,updated_at=? WHERE global_job_id=? AND fencing_token=?').run(input.status, Object.values(safeResult).some(value => value !== undefined) ? JSON.stringify(safeResult) : null, input.failureCode ?? null, nowIso(), input.jobId, input.fencingToken);
@@ -252,7 +319,7 @@ export function transitionControllerJob(input: { jobId: string; workerId: string
 }
 
 export function assertCurrentControllerLease(input: { jobId: string; workerId: string; fencingToken: number;leaseId?:string;service?:string;policyVersion?:number;requireCodeChange?:boolean }, dbPath?: string) {
-  const db = openControllerDb(dbPath); let row:({ok:number;work_class?:string;service?:string;project_lock_version?:number|null;policy_version?:number|null}|undefined); try { row = db.prepare("SELECT 1 ok,work_class,service,project_lock_version,policy_version FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND fencing_token=? AND (? IS NULL OR lease_id=?) AND (? IS NULL OR service=?) AND status IN ('Claimed','Running','Testing') AND expires_at>? ").get(input.jobId, input.workerId, input.fencingToken, input.leaseId??null,input.leaseId??null,input.service??null,input.service??null,nowIso()) as typeof row; if(row){assertProjectLockVersion(db,row);if(input.requireCodeChange&&row.work_class!=='code_change')throw new Error('CODE_CHANGE_LEASE_REQUIRED');if(input.policyVersion!==undefined&&row.policy_version!==input.policyVersion)throw new Error(`POLICY_VERSION_STALE:${row.policy_version??'Unknown'}`);} } finally { db.close(); }
+  const db = openControllerDb(dbPath); let row:({ok:number;work_class?:string;service:string;kind:string;complexity_score:number|null;project_lock_version?:number|null;policy_version?:number|null}|undefined); try { row = db.prepare("SELECT 1 ok,work_class,service,kind,complexity_score,project_lock_version,policy_version FROM controller_jobs WHERE global_job_id=? AND worker_id=? AND fencing_token=? AND (? IS NULL OR lease_id=?) AND (? IS NULL OR service=?) AND status IN ('Claimed','Running','Testing') AND expires_at>? ").get(input.jobId, input.workerId, input.fencingToken, input.leaseId??null,input.leaseId??null,input.service??null,input.service??null,nowIso()) as typeof row; if(row){assertProjectLockVersion(db,row);if(input.requireCodeChange&&row.work_class!=='code_change')throw new Error('CODE_CHANGE_LEASE_REQUIRED');if(input.policyVersion!==undefined&&row.policy_version!==input.policyVersion)throw new Error(`POLICY_VERSION_STALE:${row.policy_version??'Unknown'}`);if(row.work_class==='code_change')assertCodeChangePolicy(db,row,input.workerId,input.policyVersion??row.policy_version);} } finally { db.close(); }
   if (!row) throw new Error('Current fencing token is not valid; external side effect blocked.'); return true;
 }
 
@@ -282,8 +349,13 @@ export function controllerDashboardSnapshot(dbPath?: string, staleAfterMs = 45_0
   const workers = (db.prepare('SELECT worker_id AS workerId,os,host_label AS hostLabel,capabilities,codex_cli_status AS codexCliStatus,chatgpt_login_status AS chatgptLoginStatus,sandbox_status AS sandboxStatus,cpu_count AS cpuCount,available_memory_bytes AS availableMemoryBytes,allow_code_changes AS allowCodeChanges,heartbeat_at AS heartbeatAt,current_job_id AS currentJobId,execution_status AS executionStatus,last_error_code AS lastErrorCode,state FROM controller_workers ORDER BY worker_id').all() as any[]).map(worker => ({ ...worker, allowCodeChanges: Boolean(worker.allowCodeChanges), capabilities: JSON.parse(worker.capabilities), state: worker.state === 'Disabled' ? 'Disabled' : now - Date.parse(worker.heartbeatAt) > staleAfterMs ? 'Offline' : worker.state }));
    const jobs = db.prepare('SELECT global_job_id AS globalJobId,local_task_id AS localTaskId,service,kind,work_class AS workClass,required_os AS requiredOs,title,status,worker_id AS workerId,lease_id AS leaseId,fencing_token AS fencingToken,acquired_at AS acquiredAt,expires_at AS expiresAt,last_renewed_at AS lastRenewedAt,created_at AS createdAt,updated_at AS updatedAt,failure_code AS failureCode,project_lock_version AS projectLockVersion,policy_version AS policyVersion FROM controller_jobs ORDER BY created_at DESC LIMIT 200').all() as any[];
   const events = db.prepare('SELECT id,global_job_id AS globalJobId,worker_id AS workerId,event,fencing_token AS fencingToken,detail,created_at AS createdAt FROM controller_events ORDER BY id DESC LIMIT 200').all() as any[];
+  const policyBlocks=db.prepare('SELECT global_job_id AS globalJobId,policy_version AS policyVersion,reason,created_at AS createdAt FROM controller_job_policy_blocks ORDER BY created_at DESC LIMIT 100').all();
+  const policy=readCurrentPolicy(db),utcDay=new Date(now).toISOString().slice(0,10);
+  const developmentLimits=policy?Object.entries(policy.services).map(([service,limits])=>({service,utcDate:utcDay,maximumConcurrentJobs:limits.maximumConcurrentJobs,activeJobs:(db.prepare("SELECT COUNT(*) AS count FROM controller_jobs WHERE service=? AND work_class='code_change' AND status IN ('Claimed','Running','Testing')").get(service) as {count:number}).count,maximumDailyDevelopmentJobs:limits.maximumDailyDevelopmentJobs,startedToday:(db.prepare("SELECT COUNT(DISTINCT global_job_id) AS count FROM controller_jobs WHERE service=? AND work_class='code_change' AND started_at IS NOT NULL AND substr(started_at,1,10)=?").get(service,utcDay) as {count:number}).count,maximumRetryCount:limits.maximumRetryCount,maximumCodexExecutionTimeSeconds:limits.maximumCodexExecutionTimeSeconds,maximumFeatureComplexity:limits.maximumFeatureComplexity,enforcement:'Claim, Running transition, lease renewal, and side-effect assertion'})):[];
+  const ackTable=Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='worker_policy_acknowledgements'").get());
+  const workerPolicyAcknowledgements=ackTable?db.prepare('SELECT worker_id AS workerId,policy_version AS policyVersion,acknowledged_at AS acknowledgedAt FROM worker_policy_acknowledgements ORDER BY worker_id').all():[];
   const workerFresh = workers.filter(worker => worker.state !== 'Offline' && worker.state !== 'Disabled').length;
-  db.close(); return { controller: 'Local SQLite Controller', configured: true, workerRegistration: workers.length ? 'Configured' : 'Not Configured', online: workerFresh > 0, checkedAt: nowIso(), workers, jobs, events, counts: { workers: workers.length, onlineWorkers: workerFresh, queued: jobs.filter(job => ['Discovered', 'Ready'].includes(job.status)).length, active: jobs.filter(job => ACTIVE.includes(job.status as typeof ACTIVE[number])).length, completed: jobs.filter(job => job.status === 'Completed').length, failed: jobs.filter(job => job.status === 'Failed').length } };
+  db.close(); return { controller: 'Local SQLite Controller', configured: true, policyVersion:policy?.version??null,workerRegistration: workers.length ? 'Configured' : 'Not Configured', online: workerFresh > 0, checkedAt: nowIso(), utcDate:utcDay,workers,workerPolicyAcknowledgements,developmentLimits,policyBlocks,jobs, events, counts: { workers: workers.length, onlineWorkers: workerFresh, queued: jobs.filter(job => ['Discovered', 'Ready'].includes(job.status)).length, active: jobs.filter(job => ACTIVE.includes(job.status as typeof ACTIVE[number])).length, completed: jobs.filter(job => job.status === 'Completed').length, failed: jobs.filter(job => job.status === 'Failed').length } };
 }
 
 export function controllerJobStatuses(jobIds: string[], dbPath?: string) {

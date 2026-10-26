@@ -144,6 +144,7 @@
 .service-policy-label>div{display:grid;gap:3px;min-width:0}.service-policy-label b{font-size:12px;overflow-wrap:anywhere}
 .service-policy-card .switch-control{margin-top:4px}
 .priority-card,.limits-panel{margin-top:14px;padding:15px;border:1px solid #e2e7ef;border-radius:10px;background:#fbfcfe}
+.controller-limit-status{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;padding:10px;border-radius:8px;background:#f1f5fa;font-size:11px;line-height:1.45}.controller-limit-status span{padding:5px 8px;border:1px solid #e0e5ed;border-radius:6px;background:#fff;overflow-wrap:anywhere}
 .priority-card h4,.limits-panel h4{font-size:14px}.priority-card h4 small{display:inline-block;color:#65738b;font-size:11px}
 .priority-number{max-width:420px;margin-top:12px}
 .number-field{display:grid;align-content:start;gap:8px;min-width:0;padding:12px;border:1px solid #e0e6ef;border-radius:9px;background:#fff;font-size:12px;font-weight:700}

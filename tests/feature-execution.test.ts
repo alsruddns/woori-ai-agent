@@ -21,7 +21,7 @@ describe('Feature Execution Planner', () => {
   it('creates a bounded plan with immutable protected paths', () => {
     const plan = planFeatureExecution(planInput);
     expect(plan.status).toBe('Planned');
-    expect(plan.maxRetries).toBe(2);
+    expect(plan.maxRetries).toBe(3);
     expect(plan.forbiddenPaths).toContain('.github/**');
     expect(plan.policyVersion).toBe(3);
   });

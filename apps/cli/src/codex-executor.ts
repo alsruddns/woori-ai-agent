@@ -9,14 +9,16 @@ import { listDevelopmentRepositories, type DevelopmentStatus } from './developme
 import { codexExecArgs, codexLoginStatus, codexPlatformReadiness, codexSandboxArgs, discoverCodexCli, isWithinRoot, paidCredentialVariablesPresent, parseAllowedPaths, pathMatchesAllowlist, probeCodexSandbox, redactCodexOutput, safeCodexEnv, secretFindings, type CodexLauncher } from './codex-cli.js';
 import {appendDevelopmentAuditEvent,createOrLinkTaskAudit,recordDevelopmentIntent,recordTaskAuditEvent} from './development-audit.js';
 import {getAgentPolicy} from './agent-policy.js';
+import {finishCodexInvocation,markCodexInvocationStarted,reserveCodexInvocation} from './codex-invocations.js';
 import { validateExecutionContractChanges, type ExecutionContract } from './feature-execution.js';
 
 type Task={task_id:string;service:string;status:DevelopmentStatus;title:string;kind:string;evidence:string;acceptance_criteria:string;details_json:string};
-type ExecuteOptions={taskId:string;approved:boolean;allowedPaths:string;timeoutMs?:number;maxRetries?:number;expectedPolicyVersion?:number;leaseIsCurrent?:()=>boolean;auditContext?:{workerId?:string;controllerId?:string;fencingToken?:number;leaseJobId?:string;correlationId?:string};executionLogRoot?:string;executionContract?:ExecutionContract;launcher?:CodexLauncher;platform?:string;env?:NodeJS.ProcessEnv;runCodex?:typeof runProcess;runValidation?:typeof validateChanges;repositoryOverride?:ReturnType<typeof listDevelopmentRepositories>[number];agentDataRoot?:string;sandboxProbe?:typeof probeCodexSandbox};
+type ExecuteOptions={taskId:string;approved:boolean;allowedPaths:string;timeoutMs?:number;maxRetries?:number;expectedPolicyVersion?:number;leaseIsCurrent?:()=>boolean;controllerDbPath?:string;auditContext?:{workerId?:string;controllerId?:string;fencingToken?:number;leaseJobId?:string;correlationId?:string};executionLogRoot?:string;executionContract?:ExecutionContract;launcher?:CodexLauncher;platform?:string;env?:NodeJS.ProcessEnv;runCodex?:typeof runProcess;runValidation?:typeof validateChanges;repositoryOverride?:ReturnType<typeof listDevelopmentRepositories>[number];agentDataRoot?:string;sandboxProbe?:typeof probeCodexSandbox};
 type ProcessResult={exitCode:number|null;timedOut:boolean;stdout:string;stderr:string;stopReason?:string;processId?:number};
-const MAX_TIMEOUT_MS=20*60*1000;
+const MAX_TIMEOUT_MS=60*60*1000;
 const MAX_LOG_CHARS=1_000_000;
 const safeNow=()=>new Date().toISOString();
+export function boundedCodexExecutionLimits(servicePolicy:{maximumCodexExecutionTimeSeconds:number;maximumRetryCount:number},requestedTimeoutMs?:number,requestedRetries?:number,automaticRetryEnabled=false){return{timeoutMs:Math.max(60_000,Math.min(MAX_TIMEOUT_MS,requestedTimeoutMs??10*60*1000,servicePolicy.maximumCodexExecutionTimeSeconds*1000)),maxRetries:Math.max(0,Math.min(3,servicePolicy.maximumRetryCount,automaticRetryEnabled?Math.floor(requestedRetries??0):0))};}
 
 function exec(command:string,args:string[],cwd:string,timeout=8000){
  const r=spawnSync(command,args,{cwd,encoding:'utf8',windowsHide:true,timeout,maxBuffer:1024*1024});
@@ -118,31 +120,46 @@ export async function executeApprovedTask(options:ExecuteOptions){
  const repo=taskRepo(task,options.repositoryOverride);if(repo.id==='money')return block('MoneyBook is permanently excluded from automated code changes.');
  if(repo.writeLocked)return block(repo.lockReason??'Repository is write-locked.');
  if(!repo.codeAutomationEnabled)return block('Service code automation is OFF; enable it for this service before a one-task run.');
+ const controllerDbPath=options.controllerDbPath??process.env.WOORI_CONTROLLER_DB_PATH??process.env.WOORI_AGENT_DB_PATH;
+ const executionPolicy=getAgentPolicy(controllerDbPath),servicePolicy=executionPolicy.services[task.service as keyof typeof executionPolicy.services];
+ const featureWork=/feature|new[_ -]?feature/i.test(task.kind),modeAllows=featureWork?['FEATURE_EXPANSION','FULL_AUTONOMOUS'].includes(executionPolicy.mode):['BUG_FIX','FULL_AUTONOMOUS'].includes(executionPolicy.mode);
+ if(executionPolicy.emergencyStop||executionPolicy.mode==='PAUSED'||!executionPolicy.globalAutomationEnabled||!modeAllows)return block('Current Controller mode, global automation, or Emergency Stop blocks code changes.');
+ if(!servicePolicy?.enabled||!servicePolicy.codex||!(featureWork?servicePolicy.featureDevelopment:servicePolicy.bugFix)||!executionPolicy.global.codexExecution||!(featureWork?executionPolicy.global.autonomousFeatureDevelopment:executionPolicy.global.automaticBugFix))return block('Global and service-level development/Codex policies must both allow this task.');
+ if(featureWork&&(!executionPolicy.global.featurePlanning||!executionPolicy.global.featureSpecification))return block('Feature Planning and Feature Specification policies are required.');
+ if(servicePolicy.maximumConcurrentJobs<1||servicePolicy.maximumDailyDevelopmentJobs<1)return block('Controller service execution limit blocks new development work.');
+ let taskDetails:Record<string,unknown>={};try{taskDetails=JSON.parse(task.details_json||'{}');}catch{return block('Development task metadata is invalid.');}
+ const complexity=Number.isInteger(taskDetails.complexity)?Number(taskDetails.complexity):Number.isInteger(taskDetails.featureComplexity)?Number(taskDetails.featureComplexity):null;
+ if(featureWork&&(complexity===null||complexity>servicePolicy.maximumFeatureComplexity))return block('Feature complexity is Unknown or exceeds the Controller service limit.');
  if(repo.dirtyFileCount)return block(`Source worktree contains ${repo.dirtyFileCount} pre-existing modified file(s); preserving user changes.`);
  if(!repo.repositoryVerified||!repo.worktreeEligible)return block('Repository origin/branch/worktree safety verification failed.');
  const cli=options.launcher??discoverCodexCli();if(!cli)return block('Codex CLI executable is not available.');
  const login=codexLoginStatus(cli);if(login.status!=='ChatGPT')return block(`ChatGPT CLI authentication not verified (${login.status}); no execution attempted.`);
  const sandbox=(options.sandboxProbe??probeCodexSandbox)(cli);if(sandbox.status!=='Ready')return block(sandbox.message);
- const timeout=Math.max(30_000,Math.min(MAX_TIMEOUT_MS,options.timeoutMs??10*60*1000));
+ const executionLimits=boundedCodexExecutionLimits(servicePolicy,options.timeoutMs,options.maxRetries,executionPolicy.global.automaticRetry),timeout=executionLimits.timeoutMs;
   const executionId=randomUUID();const lockKey=executionPlatform==='linux'?'__linux_worker__':task.service;let lockHeld=false,worktree='',branch='',baseSha='',auditJobUuid='';let worktreeCreated=false;let startPersisted=false;
  try{
   lockService(lockKey,task.task_id);lockHeld=true;
-  const auditJob=createOrLinkTaskAudit({taskId:task.task_id,service:task.service,title:task.title,kind:task.kind,evidence:task.evidence,details:JSON.parse(task.details_json||'{}')}),auditPolicyVersion=getAgentPolicy().version;auditJobUuid=auditJob.uuid;
+  const auditJob=createOrLinkTaskAudit({taskId:task.task_id,service:task.service,title:task.title,kind:task.kind,evidence:task.evidence,details:JSON.parse(task.details_json||'{}')}),auditPolicyVersion=getAgentPolicy(controllerDbPath).version;auditJobUuid=auditJob.uuid;
   recordDevelopmentIntent(auditJob.uuid,'CODEX_STARTED','codex-start:'+executionId,{taskId:task.task_id,service:task.service,platform:executionPlatform,worktreeMutationNotYetStarted:true},undefined,options.auditContext);
   recordDevelopmentIntent(auditJob.uuid,'BRANCH_CREATE_INTENT','branch-intent:'+executionId,{taskId:task.task_id,service:task.service,branchWillBeIsolated:true},undefined,options.auditContext);
-  if(getAgentPolicy().version!==auditPolicyVersion||(options.expectedPolicyVersion!==undefined&&options.expectedPolicyVersion!==auditPolicyVersion))throw new Error('Controller policy changed after audit intent; no worktree mutation is permitted.');
+  if(getAgentPolicy(controllerDbPath).version!==auditPolicyVersion||(options.expectedPolicyVersion!==undefined&&options.expectedPolicyVersion!==auditPolicyVersion))throw new Error('Controller policy changed after audit intent; no worktree mutation is permitted.');
   if(options.leaseIsCurrent&&!options.leaseIsCurrent())throw new Error('Worker lease or Fencing Token is stale; no worktree mutation is permitted.');
   const current=taskRepo(task,options.repositoryOverride);if(current.dirtyFileCount||!current.repositoryVerified||!current.worktreeEligible)throw new Error('Repository changed after preflight; execution stopped.');
   const created=createWorktree(task,current.localPath,options.agentDataRoot,current.prAutomationEnabled?current.prBaseBranch:undefined);worktree=created.worktree;branch=created.branch;baseSha=created.baseSha;worktreeCreated=true;
+  const utcDay=new Date().toISOString().slice(0,10),usageDb=initDb();try{const started=usageDb.prepare("SELECT COUNT(DISTINCT task_id) AS count FROM development_executions WHERE service=? AND substr(started_at,1,10)=?").get(task.service,utcDay) as {count:number};const alreadyStarted=usageDb.prepare("SELECT 1 FROM development_executions WHERE task_id=? AND substr(started_at,1,10)=? LIMIT 1").get(task.task_id,utcDay);if(!alreadyStarted&&started.count>=servicePolicy.maximumDailyDevelopmentJobs)throw new Error(`DAILY_DEVELOPMENT_LIMIT_REACHED:${started.count}/${servicePolicy.maximumDailyDevelopmentJobs}:UTC`);}finally{usageDb.close();}
   persistStart(executionId,task,cli.version,worktree,branch,baseSha,patterns);startPersisted=true;
-  if(getAgentPolicy().version!==auditPolicyVersion)throw new Error('Controller policy changed after worktree preparation; Codex execution is stopped.');
-  const taskStarted=Date.now(),retryLimit=Math.max(0,Math.min(2,Math.floor(options.maxRetries??0))),logParts:string[]=[];let retryFeedback:string|undefined,attemptCount=0,processResult:ProcessResult={exitCode:null,timedOut:false,stdout:'',stderr:''},diff:ValidationResult={passed:false,changedFiles:[],verification:{passed:false,failures:['Codex did not execute.']}};let priorError:string|undefined;
+  if(getAgentPolicy(controllerDbPath).version!==auditPolicyVersion)throw new Error('Controller policy changed after worktree preparation; Codex execution is stopped.');
+  const taskStarted=Date.now(),retryLimit=executionLimits.maxRetries,logParts:string[]=[];let retryFeedback:string|undefined,attemptCount=0,processResult:ProcessResult={exitCode:null,timedOut:false,stdout:'',stderr:''},diff:ValidationResult={passed:false,changedFiles:[],verification:{passed:false,failures:['Codex did not execute.']}};let priorError:string|undefined;
   for(let attempt=0;attempt<=retryLimit;attempt++){
    attemptCount=attempt+1;
-   if(getAgentPolicy().version!==auditPolicyVersion||(options.expectedPolicyVersion!==undefined&&options.expectedPolicyVersion!==auditPolicyVersion))throw new Error('Controller policy version changed; Codex execution stopped.');
+   const latestPolicy=getAgentPolicy(controllerDbPath);if(latestPolicy.version!==auditPolicyVersion||(options.expectedPolicyVersion!==undefined&&options.expectedPolicyVersion!==auditPolicyVersion)||latestPolicy.emergencyStop||!latestPolicy.global.codexExecution||!latestPolicy.services[task.service as keyof typeof latestPolicy.services]?.codex)throw new Error('Controller policy version or execution permission changed; Codex execution stopped.');
    if(options.leaseIsCurrent&&!options.leaseIsCurrent())throw new Error('Worker lease or Fencing Token is stale; Codex execution stopped.');
    const remaining=timeout-(Date.now()-taskStarted);if(remaining<=0){processResult={exitCode:null,timedOut:true,stdout:'',stderr:'Task execution deadline reached.'};diff={passed:false,changedFiles:gitStatusFiles(worktree),verification:{passed:false,failures:['Task execution timed out.']}};break;}
-   processResult=await(options.runCodex??runProcess)(cli,codexExecArgs(worktree,'workspace-write',promptFor(task,patterns,retryFeedback,options.executionContract,worktree),executionPlatform),worktree,remaining,safeCodexEnv(options.env??process.env,executionPlatform));logParts.push(processResult.stdout,processResult.stderr);
+   let invocation:ReturnType<typeof reserveCodexInvocation>|undefined,processStarted=false;
+   if(!options.runCodex){try{invocation=reserveCodexInvocation({databasePath:path.resolve(process.env.WOORI_AGENT_DB_PATH??'data/woori-agent.sqlite'),developmentJobId:task.task_id,workerId:options.auditContext?.workerId??'local-windows-worker',platform:executionPlatform,featureId:options.executionContract?.featureId,attemptNumber:attemptCount,invocationType:`development:${executionId}`,maxPerJob:retryLimit+1,maxPerDay:1,maxConcurrent:1});}catch(error){processResult={exitCode:null,timedOut:false,stdout:'',stderr:error instanceof Error?error.message:'Codex invocation could not be reserved.',stopReason:'Invocation budget blocked.'};diff={passed:false,changedFiles:gitStatusFiles(worktree),verification:{passed:false,failures:[processResult.stderr]}};break;}}
+   processResult=await(options.runCodex??runProcess)(cli,codexExecArgs(worktree,'workspace-write',promptFor(task,patterns,retryFeedback,options.executionContract,worktree),executionPlatform),worktree,remaining,safeCodexEnv(options.env??process.env,executionPlatform),pid=>{if(invocation){markCodexInvocationStarted(invocation,pid);processStarted=true;}});
+   if(invocation)finishCodexInvocation(invocation,{status:!processStarted?'Not Started':processResult.timedOut?'Timed Out':processResult.exitCode===0&&!processResult.stopReason?'Completed':'Failed',exitCode:processResult.exitCode,timedOut:processResult.timedOut,retryReason:processResult.stopReason??null,processId:processResult.processId});
+   logParts.push(processResult.stdout,processResult.stderr);
    const afterCodex=timeout-(Date.now()-taskStarted);
    diff=processResult.exitCode===0&&!processResult.timedOut&&!processResult.stopReason&&afterCodex>0?(options.runValidation??validateChanges)(cli,worktree,patterns,afterCodex,baseSha,options.executionContract):{passed:false,changedFiles:gitStatusFiles(worktree),verification:{passed:false,failures:[processResult.stopReason??(processResult.timedOut||afterCodex<=0?'Task execution timed out.':`Codex exited with status ${processResult.exitCode}.`)]}};
    const failedScript=(diff.verification as {scripts?:Array<{script:string;exitCode:number|null;timedOut:boolean;output:string}>}).scripts?.find(item=>item.exitCode!==0||item.timedOut);

@@ -125,7 +125,7 @@ export function planFeatureExecution(input: FeatureExecutionPlanInput) {
   if (!Number.isSafeInteger(input.policyVersion) || input.policyVersion < 1) reasons.push('A current Controller policy version is required.');
   if (!input.lease.workerId || !input.lease.leaseId || !Number.isSafeInteger(input.lease.fencingToken) || input.lease.fencingToken < 1 || Date.parse(input.lease.expiresAt) <= Date.now()) reasons.push('A current Worker Lease and Fencing Token are required.');
   const timeoutMs = Math.max(30_000, Math.min(20 * 60_000, input.timeoutMs ?? 5 * 60_000));
-  const maxRetries = Math.max(0, Math.min(2, Math.floor(input.maxRetries ?? 2)));
+  const maxRetries = Math.max(0, Math.min(3, Math.floor(input.maxRetries ?? 2)));
   const executionContract: ExecutionContract | undefined = input.executionContract ? {
     ...input.executionContract,
     version: 1,
@@ -212,7 +212,7 @@ export async function runBoundedFeatureAttempts<T>(options: {
   execute: (attempt: number) => Promise<{ ok: boolean; value: T; error?: string; timedOut?: boolean; usageLimit?: boolean }>;
   record: (event: { attempt: number; ok: boolean; error?: string; stopReason?: RetryStopReason }) => void | Promise<void>;
 }) {
-  const maxRetries = Math.max(0, Math.min(2, Math.floor(options.maxRetries)));
+  const maxRetries = Math.max(0, Math.min(3, Math.floor(options.maxRetries)));
   let previousError: string | undefined;
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (options.currentPolicyVersion() !== options.policyVersion) return { status: 'Blocked' as const, attempts: attempt - 1, stopReason: 'policy-changed' as const };
