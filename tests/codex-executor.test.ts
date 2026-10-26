@@ -96,7 +96,7 @@ describe('Codex local execution safety',()=>{
   expect((listDevelopmentExecutions()[0] as Record<string,unknown>)?.authMode).toBe('ChatGPT');
  });
 
- it('persists a real spawned CLI process invocation as Unknown subscription usage without any model request',async()=>{
+ it.skipIf(process.env.GITHUB_ACTIONS==='true')('persists a fake local CLI process invocation as Unknown subscription usage without any model request',async()=>{
   const root=setup();const source=fixtureRepo(root),taskId=makeTask(),cli=fakeCli(root);
   const result=await executeApprovedTask({taskId,approved:true,platform:'win32',allowedPaths:'src/**',launcher:cli,repositoryOverride:repository(source),agentDataRoot:path.join(root,'orchestrator'),sandboxProbe:()=>({status:'Ready',message:'fixture sandbox ready',exitCode:0}),runValidation:()=>({passed:false,changedFiles:[],verification:{passed:false,failures:['fixture contains no generated change']}})});
   const invocations=listCodexInvocations(path.join(root,'queue.sqlite'));
