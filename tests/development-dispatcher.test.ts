@@ -11,8 +11,8 @@ function base() {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'woori-dispatcher-'));
   const policy = getAgentPolicy(path.join(root, 'controller.sqlite'));
   const lease = { jobId: 'job-test-001', workerId: 'windows-worker-01', leaseId: 'lease-test', fencingToken: 7, expiresAt: new Date(Date.now() + 60_000).toISOString(), status: 'Claimed', policyVersion: policy.version };
-  const job: DispatchableControllerJob = { jobId: lease.jobId, localTaskId: 'FEATURE-2026-000008', service: 'quiz', kind: 'feature-development', workClass: 'code_change', title: 'Retry incorrect answers', status: 'Claimed', policyVersion: policy.version };
-  const context: DevelopmentDispatchContext = { policy, worker: { os: 'windows', allowCodeChanges: false, capabilities: ['qa'], sandboxStatus: 'Ready', codexCliStatus: 'Ready', chatgptLoginStatus: 'ChatGPT' }, lease, projectUnlocked: true, invocationBudgetAvailable: true, auditReady: true, explicitExecutionRequest: true, jobAllowlisted: true };
+  const job: DispatchableControllerJob = { jobId: lease.jobId, localTaskId: 'task-feature-008', featureId: 'FEATURE-2026-000008', service: 'quiz', kind: 'feature-development', workClass: 'code_change', title: 'Retry incorrect answers', status: 'Claimed', policyVersion: policy.version };
+  const context: DevelopmentDispatchContext = { policy, worker: { os: 'windows', allowCodeChanges: false, capabilities: ['qa'], sandboxStatus: 'Ready', codexCliStatus: 'Ready', chatgptLoginStatus: 'ChatGPT' }, lease, projectUnlocked: true, invocationBudgetAvailable: true, auditReady: true, explicitExecutionRequest: true, jobAllowlisted: true, requestedFeatureId: 'FEATURE-2026-000008' };
   return { policy, lease, job, context };
 }
 
@@ -63,5 +63,22 @@ describe('Windows Worker Development Dispatcher', () => {
     });
     expect(result.status).toBe('Blocked');
     expect(executeFeature).not.toHaveBeenCalled();
+  });
+
+  it('blocks a different feature even if the job ID was explicitly selected', () => {
+    const { job, context } = base();
+    job.featureId = 'FEATURE-OTHER';
+    context.requestedFeatureId = 'FEATURE-OTHER';
+    const decision = evaluateDevelopmentDispatch(job, context);
+    expect(decision.allowed).toBe(false);
+    if (!decision.allowed) expect(decision.reasons).toContain('Only the explicitly approved FEATURE-2026-000008 feature may be dispatched.');
+  });
+
+  it('blocks a different service even when the feature ID matches', () => {
+    const { job, context } = base();
+    job.service = 'docs';
+    const decision = evaluateDevelopmentDispatch(job, context);
+    expect(decision.allowed).toBe(false);
+    if (!decision.allowed) expect(decision.reasons).toContain('This dispatcher is restricted to the Quiz project.');
   });
 });

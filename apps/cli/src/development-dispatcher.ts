@@ -4,6 +4,7 @@ import type { Lease } from './distributed-queue.js';
 export type DispatchableControllerJob = {
   jobId: string;
   localTaskId: string | null;
+  featureId?: string | null;
   service: string;
   kind: string;
   workClass: 'analysis' | 'code_change';
@@ -21,18 +22,20 @@ export type DevelopmentDispatchContext = {
   auditReady: boolean;
   explicitExecutionRequest: boolean;
   jobAllowlisted: boolean;
+  requestedFeatureId?: string | null;
 };
 
 export type DispatcherDecision = { allowed: true; mode: 'read-only' | 'feature-development'; reasons: [] } | { allowed: false; mode: 'blocked'; reasons: string[] };
 
-const codeService = (value: string) => value === 'quiz' || value === 'docs' || value === 'tools';
+const allowedQuizFeatureId = 'FEATURE-2026-000008';
 
 export function evaluateDevelopmentDispatch(job: DispatchableControllerJob, context: DevelopmentDispatchContext): DispatcherDecision {
   const reasons: string[] = [];
   if (context.lease.jobId !== job.jobId || context.lease.status !== 'Claimed' || Date.parse(context.lease.expiresAt) <= Date.now()) reasons.push('A current Controller lease is required.');
   if (job.status !== 'Claimed') reasons.push('The Controller job must be claimed before dispatch.');
   if (job.workClass === 'analysis') return reasons.length ? { allowed: false, mode: 'blocked', reasons } : { allowed: true, mode: 'read-only', reasons: [] };
-  if (!codeService(job.service)) reasons.push('The service is not allowed for autonomous code changes.');
+  if (job.service !== 'quiz') reasons.push('This dispatcher is restricted to the Quiz project.');
+  if (job.featureId !== allowedQuizFeatureId || context.requestedFeatureId !== allowedQuizFeatureId) reasons.push(`Only the explicitly approved ${allowedQuizFeatureId} feature may be dispatched.`);
   if (!job.localTaskId) reasons.push('A linked local Development Queue task is required.');
   if (!context.explicitExecutionRequest) reasons.push('A one-job explicit development execution request is required.');
   if (!context.jobAllowlisted) reasons.push('The claimed job is not in the explicit dispatch allowlist.');
