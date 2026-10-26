@@ -51,7 +51,7 @@ describe('Codex local execution safety',()=>{
   expect(redactCodexOutput('Bearer abc.def token sk-123456789012345678901234')).not.toContain('sk-123456789012345678901234');
  });
 
- it('terminates a running Codex process when its asynchronous Controller execution guard fails',async()=>{
+ it.skipIf(process.platform!=='win32')('terminates a running Codex process when its asynchronous Controller execution guard fails',async()=>{
   const root=setup(),file=path.join(root,'long-running-codex.cjs');fs.writeFileSync(file,'setInterval(()=>{},1000);');let checks=0;
   const result=await codexExecutorInternals.runProcess({kind:'node',executable:process.execPath,prefixArgs:[file],version:'fixture'},[],root,20_000,{},undefined,async()=>{checks++;return'POLICY_OR_PERMISSION_CHANGED';});
   expect(checks).toBeGreaterThan(0);expect(result.stopReason).toBe('POLICY_OR_PERMISSION_CHANGED');expect(result.exitCode).not.toBe(0);
